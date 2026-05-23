@@ -1332,13 +1332,13 @@ async function sendChatMessage(modelType = 'fast', messageOverride = null) {
         function_declarations: [
           {
             name: "apply_redlines",
-            description: "Applies suggested edits to the document. Use this tool whenever the user asks to 'edit text', 'change text', 'modify', 'add', 'delete', 'reword', 'rephrase', 'update', 'bold', 'italicize', 'underline', 'strikethrough', or apply inline TEXT FORMATTING to existing paragraphs.\n\nIMPORTANT - FORMATTING RULES:\n- Bold: **text**\n- Italic: *text*\n- Underline: ++text++\n- Strikethrough: ~~text~~\n\nIMPORTANT - LIST RULES:\n- Use Markdown syntax for lists. \n- For Bullet Lists: Use '* item'. For nested items, indent with 4 spaces (e.g., '    * sub-item').\n- For Numbered Lists: Use '1. item', 'a. item', 'i. item', etc. explicitly. \n- For Nested Numbering: Use '1.1.', '1.1.1.' styles if appropriate. \n- DO NOT use simple hyphens ('-') if you intend to create a structured or numbered list. \n- INDENTATION is critical for sub-levels. Use 2 or 4 spaces.\n\nFor full list structure conversions (like turning multiple lines into A., B., C. or 1., 2., 3. list items), prefer the dedicated list tools.\n\nDo NOT suggest changes in the chat; always use this tool to apply them directly. The edits will be applied under track changes (redlines). NEVER say you have applied edits unless you have successfully called this tool.",
+            description: "Applies suggested edits to the document. Use this tool whenever the user asks to 'edit text', 'change text', 'modify', 'add', 'delete', 'reword', 'rephrase', 'update', 'bold', 'italicize', 'underline', 'strikethrough', convert text into a table, or apply inline TEXT FORMATTING to existing paragraphs.\n\nIMPORTANT - FORMATTING RULES:\n- Bold: **text**\n- Italic: *text*\n- Underline: ++text++\n- Strikethrough: ~~text~~\n\nIMPORTANT - LIST RULES:\n- Use Markdown syntax for lists. \n- For Bullet Lists: Use '* item'. For nested items, indent with 4 spaces (e.g., '    * sub-item').\n- For Numbered Lists: Use '1. item', 'a. item', 'i. item', etc. explicitly. \n- For Nested Numbering: Use '1.1.', '1.1.1.' styles if appropriate. \n- DO NOT use simple hyphens ('-') if you intend to create a structured or numbered list. \n- INDENTATION is critical for sub-levels. Use 2 or 4 spaces.\n\nIMPORTANT - TABLE RULES:\n- Use apply_redlines for converting normal paragraphs into a new table.\n- In the instruction, explicitly identify the full paragraph range to replace (for example: 'Replace P4 through P6 with a two-column markdown table').\n- Require a complete multiline GitHub Markdown table with a header row, separator row, and data row(s).\n- NEVER ask for a single pipe-delimited line like 'A|B|C'; that is plain text, not a Word table.\n- Preserve multi-line source blocks by using additional table rows. Do not put HTML tags such as <br> inside markdown table cells.\n\nFor full list structure conversions (like turning multiple lines into A., B., C. or 1., 2., 3. list items), prefer the dedicated list tools.\n\nDo NOT suggest changes in the chat; always use this tool to apply them directly. The edits will be applied under track changes (redlines). NEVER say you have applied edits unless you have successfully called this tool.",
             parameters: {
               type: "OBJECT",
               properties: {
                 instruction: {
                   type: "STRING",
-                  description: "The specific instruction for how to edit the document (e.g., 'Change Lessor to Landlord', 'Fix spelling', 'Reword the introduction').",
+                  description: "The specific instruction for how to edit the document (e.g., 'Change Lessor to Landlord', 'Fix spelling', 'Reword the introduction'). For text-to-table conversions, include the exact source paragraph range and the complete multiline markdown table to insert; do not give only a vague instruction like 'turn these into a table'.",
                 },
               },
               required: ["instruction"],
@@ -1575,6 +1575,8 @@ TOOL SELECTION GUIDANCE:
 IMPORTANT: You have access to tools. You can chat and respond normally to questions. However, when the user asks for an action that involves manipulating the document, you should HEAVILY FAVOR using the corresponding tool rather than just describing the action.
 
 CRITICAL: For plain text edits and inline formatting within existing paragraphs, use \`apply_redlines\`. For structural list/table/section edits, use the dedicated tools (\`edit_list\`, \`convert_headers_to_list\`, \`edit_table\`, \`edit_section\`).
+CRITICAL: When the user asks to convert normal paragraphs into a new table, use \`apply_redlines\`, not \`edit_table\` (which is only for existing tables marked with T:row,col).
+CRITICAL: For text-to-table conversions, your \`apply_redlines\` instruction MUST say which full paragraph range is being replaced and MUST require a complete multiline GitHub Markdown table. Example: "Replace P4 through P6 with this two-column markdown table: | Disclosing Party | Receiving Party |\\n|---|---|\\n| [Name of Disclosing Party] | [Name of Receiving Party] |\\n| [Address of Disclosing Party] | [Address of Receiving Party] |". Never request a single pipe-delimited line.
 CRITICAL: If the user asks to "Reply to a comment" by "changing textual content", you MUST call BOTH \`apply_redlines\` (to apply the text change) AND \`insert_comment\` (to insert the reply). Call them in the same turn.
 NEVER claim to have "added a sentence" or "changed text" if you have only called \`insert_comment\`.
 NEVER state that you have taken an action unless you have successfully invoked the corresponding tool.
@@ -1589,7 +1591,15 @@ CRITICAL: Do NOT use internal paragraph markers (like [P#] or P#) or internal ID
  - Ordered: Use '1. ', 'a. ', 'i. ', etc.
  - Multi-level / Outlines: Use exact numbering like '1.1.', '1.1.1.' or '2.1. ' if that is the intent.
  - Indentation: Sub-items MUST be indented by 4 spaces.
- - Do NOT use generic bullets ('-') if you want specific numbering. The engine relies on your markers (e.g., '1.1.') to detect the list type.`,
+ - Do NOT use generic bullets ('-') if you want specific numbering. The engine relies on your markers (e.g., '1.1.') to detect the list type.
+
+ TABLE HANDLING:
+ - Existing table edits: use \`edit_table\` only when the target paragraph has a T:row,col marker.
+ - New table creation from normal text: use \`apply_redlines\`.
+ - In \`apply_redlines\` instructions for tables, name the contiguous source range and require multiline markdown table syntax.
+ - Correct table shape: "| Header A | Header B |\\n|---|---|\\n| Cell A | Cell B |".
+ - Incorrect table shape: "Header A|Header B|Cell A|Cell B".
+ - If source blocks have multiple lines, preserve them as additional table rows. Do not use HTML tags such as <br> inside table cells.`,
         },
       ],
     };

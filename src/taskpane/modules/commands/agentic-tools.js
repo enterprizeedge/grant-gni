@@ -44,6 +44,59 @@ function initAgenticTools(deps) {
   } = deps);
 }
 
+export function detectRequestedContentKind(instruction) {
+  const normalizedInstruction = String(instruction || '').toLowerCase();
+  if (!/\btables?\b/.test(normalizedInstruction)) {
+    return null;
+  }
+
+  if (/\b(delete|remove|drop)\b.{0,40}\btables?\b|\btables?\b.{0,40}\b(delete|remove|drop)\b|\bwithout (?:a )?table\b|\bno table\b/.test(normalizedInstruction)) {
+    return null;
+  }
+
+  if (
+    /\b(?:turn|convert|make|create|insert|add|format|reformat|restructure|organize|put|place|transform|change)\b[\s\S]{0,120}\b(?:into|as|to|in)\s+(?:a\s+|an\s+)?table\b/.test(normalizedInstruction)
+    || /\b(?:into|as)\s+(?:a\s+|an\s+)?table\b/.test(normalizedInstruction)
+    || /\btable\b.{0,80}\b(?:to save space|side[- ]by[- ]side|two[- ]column|columns?|rows?)\b/.test(normalizedInstruction)
+  ) {
+    return 'table';
+  }
+
+  return null;
+}
+
+async function applyRedlineChangeSet(aiChanges, instruction = '') {
+  const redlineEnabled = loadRedlineSetting();
+  const redlineAuthor = loadRedlineAuthor();
+  let changesApplied = 0;
+  const requestedContentKind = detectRequestedContentKind(instruction);
+
+  await Word.run(async (context) => {
+    const trackingState = await setChangeTrackingForAi(context, redlineEnabled, "executeRedline");
+    try {
+      context.document.load("changeTrackingMode");
+      await context.sync();
+      const baseTrackingMode = context.document.changeTrackingMode;
+      const result = await applyRedlineChangesToWordContext(context, aiChanges, {
+        author: redlineAuthor,
+        generateRedlines: redlineEnabled,
+        disableNativeTracking: redlineEnabled,
+        baseTrackingMode,
+        logPrefix: "Redline/Shared",
+        requestedContentKind
+      });
+      changesApplied = result.changesApplied;
+    } finally {
+      await restoreChangeTracking(context, trackingState, "executeRedline");
+    }
+  });
+
+  return {
+    changesApplied,
+    redlineEnabled
+  };
+}
+
 /**
  * Agentic Tool: Applies redlines based on an instruction using Structural Anchoring.
  */
@@ -57,6 +110,7 @@ async function executeRedline(instruction, fullDocumentText) {
   try {
     // Detect document font for consistent HTML insertion
     await detectDocumentFont();
+
     // 1. Build the prompt for the diff generator
     const fullPrompt = `You are an expert legal editor. Review the document content (provided with [P#] anchors) based on the user's instruction.
 Generate a JSON array of precise changes to be made, referencing the paragraph numbers.
@@ -68,7 +122,7 @@ Each change must be an object with the following structure:
 - "endParagraphIndex": (Only for "replace_range") The integer number of the END paragraph (inclusive).
 - "operation": "edit_paragraph", "replace_paragraph", "modify_text", or "replace_range".
 - "newContent": (For "edit_paragraph" ONLY) The complete rewritten paragraph content. The system will automatically compute precise word-level changes.
-- "content": (For "replace_paragraph" and "replace_range" ONLY) The new content to insert.
+- "content": (REQUIRED for "replace_paragraph" and "replace_range" ONLY) The new content to insert.
 - "originalText": (For "modify_text" ONLY) The specific text snippet within the paragraph to find and replace. **MAX 80 characters**.
 - "replacementText": (For "modify_text" ONLY) The new text to replace "originalText" with.
 
@@ -108,12 +162,22 @@ Rules:
 - If converting text into a Markdown table:
   - Use "replace_paragraph" when it is a single paragraph.
   - Use "replace_range" when it spans multiple consecutive paragraphs.
+  - For consecutive source paragraphs, ALWAYS include "endParagraphIndex" covering the entire source block being replaced.
   - Do NOT use "modify_text" for table conversions.
+  - The "content" value MUST be a complete multiline Markdown table with a header row, separator row, and data rows.
+  - NEVER return a single pipe-delimited line such as "A|B|C"; that is plain text, not a table.
+  - Example valid table content: "| Column A | Column B |\\n|---|---|\\n| Value A | Value B |"
+  - For multi-line source blocks, use additional table rows instead of HTML tags inside cells.
+  - Example for turning party paragraphs into a two-column table:
+    [{"paragraphIndex":4,"endParagraphIndex":6,"operation":"replace_range","content":"| Disclosing Party | Receiving Party |\\n|---|---|\\n| [Name of Disclosing Party] | [Name of Receiving Party] |\\n| [Address of Disclosing Party] | [Address of Receiving Party] |"}]
 - Use "modify_text" ONLY as a fallback for very specific surgical edits where you need to target exact substrings.
 - Never use "modify_text" when the replacement includes line breaks, list markers, headings, or Markdown tables.
 - **CRITICAL LENGTH LIMIT**: For "modify_text", "originalText" MUST be **80 characters or fewer**. This is a hard limit.
 - Use "replace_range" when you need to replace multiple consecutive paragraphs (like converting a bulleted list to a single paragraph).
 - For "replace_range", provide ONLY "paragraphIndex", "endParagraphIndex", "operation", and "content". Do NOT include "originalText" or "replacementText".
+- A "replace_range" or "replace_paragraph" without a non-empty "content" field is INVALID. If you cannot determine the replacement content, return [].
+- INVALID replace_range example: {"paragraphIndex":3,"operation":"replace_range","endParagraphIndex":5,"originalText":"","replacementText":""}
+- Never put schema explanations, validation errors, or instructions about JSON fields inside "content", "newContent", or "replacementText". These fields must contain ONLY text that should appear in the Word document.
 - For "edit_paragraph", provide ONLY "paragraphIndex", "operation", and "newContent".
 - For "modify_text", "originalText" must match EXACTLY text found within that specific paragraph.
 - Do NOT include the [P#] marker in any content fields.
@@ -149,28 +213,7 @@ Return ONLY the JSON array, nothing else:`;
     }
 
     {
-      const redlineEnabled = loadRedlineSetting();
-      const redlineAuthor = loadRedlineAuthor();
-      let changesApplied = 0;
-
-      await Word.run(async (context) => {
-        const trackingState = await setChangeTrackingForAi(context, redlineEnabled, "executeRedline");
-        try {
-          context.document.load("changeTrackingMode");
-          await context.sync();
-          const baseTrackingMode = context.document.changeTrackingMode;
-          const result = await applyRedlineChangesToWordContext(context, aiChanges, {
-            author: redlineAuthor,
-            generateRedlines: redlineEnabled,
-            disableNativeTracking: redlineEnabled,
-            baseTrackingMode,
-            logPrefix: "Redline/Shared"
-          });
-          changesApplied = result.changesApplied;
-        } finally {
-          await restoreChangeTracking(context, trackingState, "executeRedline");
-        }
-      });
+      const { changesApplied, redlineEnabled } = await applyRedlineChangeSet(aiChanges, instruction);
 
       if (changesApplied === 0) {
         return {
@@ -205,14 +248,14 @@ async function callGeminiForDiffs(prompt) {
       type: "OBJECT",
       properties: {
         "paragraphIndex": { "type": "INTEGER", "description": "The paragraph number (1-based)" },
-        "endParagraphIndex": { "type": "INTEGER", "description": "Only for replace_range: the end paragraph number (inclusive)" },
+        "endParagraphIndex": { "type": "INTEGER", "description": "Only for replace_range: the end paragraph number (inclusive). Required when converting multiple paragraphs into a table." },
         "operation": {
           "type": "STRING",
           "enum": ["edit_paragraph", "replace_paragraph", "modify_text", "replace_range"],
           "description": "The type of operation to perform"
         },
         "newContent": { "type": "STRING", "description": "For edit_paragraph only: the complete rewritten paragraph content" },
-        "content": { "type": "STRING", "description": "For replace_paragraph and replace_range: the new content" },
+        "content": { "type": "STRING", "description": "Required for replace_paragraph and replace_range: the new content. For tables, use a complete multiline GitHub Markdown table with header, separator, and data rows. Do not use replacementText for these operations." },
         "originalText": { "type": "STRING", "description": "For modify_text only: the text to find (max 80 chars). Split larger edits into multiple operations." },
         "replacementText": { "type": "STRING", "description": "For modify_text only: the replacement text" }
       },
@@ -266,7 +309,13 @@ async function callGeminiForDiffs(prompt) {
       throw new Error("Gemini diff response was missing content.parts (possibly blocked by safety settings).");
     }
 
-    const jsonText = candidate.content.parts[0].text;
+    const textPart = candidate.content.parts.find(part => typeof part?.text === "string" && part.text.trim().length > 0);
+    if (!textPart) {
+      console.error("Gemini diff candidate did not include a text JSON part:", candidate);
+      throw new Error("Gemini diff response did not include JSON text.");
+    }
+
+    const jsonText = textPart.text;
     console.log("Gemini diff JSON text:", jsonText);
     return JSON.parse(jsonText);
   } catch (error) {
@@ -630,7 +679,13 @@ async function callGeminiForJSON(prompt, schema) {
     const candidate = result.candidates[0];
     if (!candidate.content || !candidate.content.parts) throw new Error("No content");
 
-    const jsonText = candidate.content.parts[0].text;
+    const textPart = candidate.content.parts.find(part => typeof part?.text === "string" && part.text.trim().length > 0);
+    if (!textPart) {
+      console.error("Gemini JSON candidate did not include a text JSON part:", candidate);
+      throw new Error("Gemini JSON response did not include JSON text.");
+    }
+
+    const jsonText = textPart.text;
     return JSON.parse(jsonText);
   } catch (error) {
     console.error("Error calling Gemini for JSON:", error);

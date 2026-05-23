@@ -1,5 +1,7 @@
 import { applyWordOperation } from './word-operation-runner.js';
 import { toScopedSharedRedlineOperation } from '@ansonlai/docx-redline-js/orchestration/redline-operation-converter.js';
+import { isMarkdownTableText } from '@ansonlai/docx-redline-js/core/paragraph-targeting.js';
+import { isLikelyStructuredTableSourceParagraph } from '@ansonlai/docx-redline-js/core/table-targeting.js';
 
 function normalizeNeedleText(value) {
     if (value == null) return '';
@@ -8,6 +10,357 @@ function normalizeNeedleText(value) {
         .replace(/\\t/g, '\t')
         .replace(/\\r/g, '\r')
         .trim();
+}
+
+function normalizeReplacementText(value) {
+    if (value == null) return '';
+    return String(value)
+        .replace(/\\n/g, '\n')
+        .replace(/\\t/g, '\t')
+        .replace(/\\r/g, '\r');
+}
+
+function getReplacementText(change, operationName) {
+    if (operationName === 'edit_paragraph') {
+        return change?.newContent;
+    }
+    if (operationName === 'replace_paragraph' || operationName === 'replace_range') {
+        return change?.content ?? change?.newContent ?? change?.replacementText;
+    }
+    if (operationName === 'modify_text') {
+        return change?.replacementText;
+    }
+    return null;
+}
+
+function hasStructuralReplacementField(change) {
+    if (!change || typeof change !== 'object') return false;
+    return Object.prototype.hasOwnProperty.call(change, 'content')
+        || Object.prototype.hasOwnProperty.call(change, 'newContent');
+}
+
+function setReplacementText(change, operationName, replacementText) {
+    if (operationName === 'edit_paragraph') {
+        change.newContent = replacementText;
+        return;
+    }
+    if (operationName === 'replace_paragraph' || operationName === 'replace_range') {
+        change.content = replacementText;
+    }
+}
+
+function splitPipeCells(line) {
+    return String(line || '')
+        .split('|')
+        .map(cell => cell.trim())
+        .filter(cell => cell.length > 0);
+}
+
+function stripTrailingColon(text) {
+    return String(text || '').trim().replace(/:\s*$/, '');
+}
+
+function markdownRow(cells) {
+    return `| ${cells.map(cell => String(cell || '').trim()).join(' | ')} |`;
+}
+
+function markdownSeparator(columnCount) {
+    return markdownRow(new Array(Math.max(1, columnCount)).fill('---'));
+}
+
+function markdownTableForLabeledColumns(columns) {
+    const safeColumns = Array.isArray(columns)
+        ? columns.filter(column => column && column.label)
+        : [];
+    if (safeColumns.length < 2) return null;
+
+    const maxDetailRows = safeColumns.reduce(
+        (max, column) => Math.max(max, Array.isArray(column.details) ? column.details.length : 0),
+        0
+    );
+
+    const bodyRows = [];
+    for (let rowIndex = 0; rowIndex < Math.max(1, maxDetailRows); rowIndex += 1) {
+        bodyRows.push(markdownRow(
+            safeColumns.map(column => String(column.details?.[rowIndex] || '').trim())
+        ));
+    }
+
+    return [
+        markdownRow(safeColumns.map(column => column.label)),
+        markdownSeparator(safeColumns.length),
+        ...bodyRows
+    ].join('\n');
+}
+
+function isMarkdownSeparatorRow(line) {
+    const normalized = String(line || '').replace(/\s+/g, '');
+    return /^\|:?-{3,}:?(\|:?-{3,}:?)+\|?$/.test(normalized);
+}
+
+function splitCellBreaks(cell) {
+    return String(cell || '')
+        .split(/<br\s*\/?>/gi)
+        .map(part => part.trim());
+}
+
+function expandMarkdownTableHtmlBreaks(text) {
+    const lines = normalizeReplacementText(text)
+        .trim()
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(line => line.startsWith('|'));
+    if (lines.length === 0 || !lines.some(line => /<br\s*\/?>/i.test(line))) {
+        return normalizeReplacementText(text).trim();
+    }
+
+    const expanded = [];
+    for (const line of lines) {
+        if (isMarkdownSeparatorRow(line)) {
+            expanded.push(line);
+            continue;
+        }
+
+        const cells = splitPipeCells(line);
+        const splitCells = cells.map(splitCellBreaks);
+        const rowCount = splitCells.reduce((max, parts) => Math.max(max, parts.length), 1);
+        for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+            expanded.push(markdownRow(splitCells.map(parts => parts[rowIndex] || '')));
+        }
+    }
+
+    return expanded.join('\n');
+}
+
+function normalizeInlineLabeledBlockTable(cells) {
+    const groups = [];
+    let current = [];
+
+    for (const cell of cells) {
+        if (isTableRangeConnectorText(cell)) {
+            if (current.length > 0) {
+                groups.push(current);
+                current = [];
+            }
+            continue;
+        }
+        current.push(cell);
+    }
+    if (current.length > 0) {
+        groups.push(current);
+    }
+
+    if (groups.length < 2 || groups.some(group => group.length < 2)) {
+        return null;
+    }
+
+    const columns = groups.map(group => ({
+        label: stripTrailingColon(group[0]),
+        details: group.slice(1)
+    }));
+    if (columns.some(column => !column.label || /[.!?]$/.test(column.label))) {
+        return null;
+    }
+
+    return markdownTableForLabeledColumns(columns);
+}
+
+function normalizeInlinePipeTable(text) {
+    const cells = splitPipeCells(text);
+    if (cells.length < 2) {
+        return null;
+    }
+
+    const labeledBlockTable = normalizeInlineLabeledBlockTable(cells);
+    if (labeledBlockTable) {
+        return labeledBlockTable;
+    }
+
+    const columnCount = cells.length % 2 === 0 ? 2 : Math.min(3, cells.length);
+    if (columnCount < 2 || cells.length < columnCount) {
+        return null;
+    }
+
+    const rows = [];
+    for (let i = 0; i < cells.length; i += columnCount) {
+        const row = cells.slice(i, i + columnCount);
+        while (row.length < columnCount) row.push('');
+        rows.push(row);
+    }
+
+    return [
+        markdownRow(rows[0]),
+        markdownSeparator(columnCount),
+        ...rows.slice(1).map(markdownRow)
+    ].join('\n');
+}
+
+export function normalizeTableReplacementText(text) {
+    const normalized = normalizeReplacementText(text).trim();
+    if (!normalized) {
+        return normalized;
+    }
+    if (isMarkdownTableText(normalized)) {
+        return expandMarkdownTableHtmlBreaks(normalized);
+    }
+
+    const lines = normalized
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(Boolean);
+
+    if (lines.length === 1 && lines[0].includes('|')) {
+        return normalizeInlinePipeTable(lines[0]) || normalized;
+    }
+
+    const pipeLines = lines.filter(line => line.includes('|'));
+    if (pipeLines.length >= 2) {
+        const rows = pipeLines.map(splitPipeCells).filter(row => row.length > 0);
+        const columnCount = rows.reduce((max, row) => Math.max(max, row.length), 0);
+        if (columnCount >= 2) {
+            const normalizedRows = rows.map(row => {
+                const copy = row.slice(0, columnCount);
+                while (copy.length < columnCount) copy.push('');
+                return copy;
+            });
+            return [
+                markdownRow(normalizedRows[0]),
+                markdownSeparator(columnCount),
+                ...normalizedRows.slice(1).map(markdownRow)
+            ].join('\n');
+        }
+    }
+
+    return normalized;
+}
+
+function replacementLooksTableLike(text) {
+    const normalized = normalizeReplacementText(text).trim();
+    return isMarkdownTableText(normalized)
+        || (normalized.includes('|') && splitPipeCells(normalized).length >= 2);
+}
+
+export function isDiagnosticReplacementText(text) {
+    const normalized = normalizeReplacementText(text)
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    if (!normalized) return false;
+
+    const diagnosticPatterns = [
+        /schema requires/,
+        /schema.*paragraphindex/,
+        /replace_range operation/,
+        /replace_paragraph operation/,
+        /do not include ["']?originaltext/,
+        /do not include .*replacementtext/,
+        /originaltext.*replacementtext/,
+        /provide only .*paragraphindex.*operation.*content/,
+        /none required for replace_range/,
+        /invalid replace_range/
+    ];
+
+    return diagnosticPatterns.some(pattern => pattern.test(normalized));
+}
+
+function isLikelyTableSourceText(text) {
+    const normalized = String(text || '').trim();
+    if (!normalized) return false;
+    if (isTableRangeConnectorText(normalized)) return true;
+    if (isLikelyStructuredTableSourceParagraph(normalized)) return true;
+
+    const logicalLines = normalized
+        .split(/[\r\n\v]+/)
+        .map(line => line.trim())
+        .filter(Boolean);
+
+    return logicalLines.length > 1
+        && logicalLines.some(line => /:\s*$/.test(line))
+        && logicalLines.some(line => /^\[.*\]$/.test(line) || /^\(.*\)$/.test(line));
+}
+
+function getLogicalParagraphLines(text) {
+    return String(text || '')
+        .split(/[\r\n\v]+/)
+        .map(line => line.trim())
+        .filter(Boolean);
+}
+
+function isTableRangeConnectorText(text) {
+    return /^(?:and|or|between|with|plus|to)$/i.test(String(text || '').trim());
+}
+
+function parseLabeledBlockParagraph(text) {
+    const lines = getLogicalParagraphLines(text);
+    if (lines.length < 2) return null;
+
+    const firstLine = lines[0];
+    const label = stripTrailingColon(firstLine);
+    const hasExplicitLabel = /:\s*$/.test(firstLine);
+    const looksLikeCompactHeading = label.length > 0
+        && label.length <= 80
+        && !/[.!?]$/.test(label)
+        && !/\s(?:is|are|was|were|shall|must|may|will|can|could|should|would)\s/i.test(label);
+
+    if (!hasExplicitLabel && !looksLikeCompactHeading) return null;
+
+    return {
+        label,
+        details: lines.slice(1)
+    };
+}
+
+export function synthesizeMarkdownTableFromSourceRange(paragraphItems, startIndex, endIndex) {
+    const items = Array.isArray(paragraphItems) ? paragraphItems : [];
+    if (
+        !Number.isInteger(startIndex)
+        || !Number.isInteger(endIndex)
+        || startIndex < 0
+        || endIndex < startIndex
+        || endIndex >= items.length
+    ) {
+        return null;
+    }
+
+    const columns = [];
+    for (let index = startIndex; index <= endIndex; index += 1) {
+        const text = String(items[index]?.text || '').trim();
+        if (!text || isTableRangeConnectorText(text)) continue;
+
+        const parsed = parseLabeledBlockParagraph(text);
+        if (parsed) {
+            columns.push(parsed);
+        }
+    }
+
+    if (columns.length >= 2) {
+        return markdownTableForLabeledColumns(columns);
+    }
+
+    return null;
+}
+
+export function inferTableConversionEndIndex(paragraphItems, startIndex, maxScan = 10) {
+    const items = Array.isArray(paragraphItems) ? paragraphItems : [];
+    if (!Number.isInteger(startIndex) || startIndex < 0 || startIndex >= items.length) {
+        return startIndex;
+    }
+
+    let endIndex = startIndex;
+    const limit = Math.min(items.length - 1, startIndex + Math.max(1, maxScan));
+    for (let index = startIndex + 1; index <= limit; index += 1) {
+        const text = String(items[index]?.text || '').trim();
+        if (!text) {
+            if (endIndex > startIndex) break;
+            continue;
+        }
+        if (!isLikelyTableSourceText(text)) {
+            break;
+        }
+        endIndex = index;
+    }
+
+    return endIndex;
 }
 
 export function findNearbyParagraphIndexForModifyText(paragraphItems, startIndex, change) {
@@ -75,15 +428,24 @@ export async function applyRedlineChangesToWordContext(context, aiChanges, optio
     const onWarn = typeof options.onWarn === 'function'
         ? options.onWarn
         : message => console.warn(`[${logPrefix}] ${message}`);
+    const requestedContentKind = options.requestedContentKind || null;
+    const requiresTableContent = requestedContentKind === 'table';
 
     let changesApplied = 0;
 
     for (const change of changes) {
         try {
-            const operationName = String(change?.operation || '').trim().toLowerCase();
+            let operationName = String(change?.operation || '').trim().toLowerCase();
             const startIndex = parseParagraphIndex(change?.paragraphIndex);
             if (!Number.isInteger(startIndex) || startIndex < 0) {
                 onWarn(`Invalid start paragraph index: ${change?.paragraphIndex}`);
+                continue;
+            }
+
+            if (requiresTableContent && operationName === 'modify_text') {
+                onWarn(
+                    `Skipping modify_text at P${change?.paragraphIndex}: table conversion requests require replace_paragraph or replace_range with markdown table content.`
+                );
                 continue;
             }
 
@@ -107,13 +469,39 @@ export async function applyRedlineChangesToWordContext(context, aiChanges, optio
                 }
             }
 
+            const normalizedChange = { ...change, operation: operationName };
+            if (operationName === 'edit_paragraph' || operationName === 'replace_paragraph' || operationName === 'replace_range') {
+                const replacementText = getReplacementText(normalizedChange, operationName);
+                const normalizedTableText = normalizeTableReplacementText(replacementText);
+                if (replacementLooksTableLike(replacementText) && normalizedTableText !== normalizeReplacementText(replacementText).trim()) {
+                    setReplacementText(normalizedChange, operationName, normalizedTableText);
+                    onWarn('Normalized pipe-delimited table replacement into markdown table syntax.');
+                }
+
+                if (isMarkdownTableText(normalizedTableText) && operationName === 'edit_paragraph') {
+                    operationName = 'replace_paragraph';
+                    normalizedChange.operation = operationName;
+                    normalizedChange.content = normalizedTableText;
+                    delete normalizedChange.newContent;
+                    onWarn('Promoted table edit_paragraph to replace_paragraph for OOXML table generation.');
+                }
+            }
+
             let endIndex = effectiveStartIndex;
             let insertionBeforeStart = false;
             if (operationName === 'replace_range') {
-                const requestedEndIndex = parseParagraphIndex(change?.endParagraphIndex);
+                let requestedEndIndex = parseParagraphIndex(normalizedChange?.endParagraphIndex);
                 if (!Number.isInteger(requestedEndIndex) || requestedEndIndex < -1) {
-                    onWarn(`Invalid replace_range endParagraphIndex: ${change?.endParagraphIndex}; no-op.`);
-                    continue;
+                    if (requiresTableContent || replacementLooksTableLike(getReplacementText(normalizedChange, operationName))) {
+                        requestedEndIndex = inferTableConversionEndIndex(paragraphs.items, effectiveStartIndex);
+                        normalizedChange.endParagraphIndex = requestedEndIndex + 1;
+                        onWarn(
+                            `Inferred missing table replace_range end as P${requestedEndIndex + 1}.`
+                        );
+                    } else {
+                        onWarn(`Invalid replace_range endParagraphIndex: ${normalizedChange?.endParagraphIndex}; no-op.`);
+                        continue;
+                    }
                 }
 
                 if (requestedEndIndex === effectiveStartIndex - 1) {
@@ -125,7 +513,109 @@ export async function applyRedlineChangesToWordContext(context, aiChanges, optio
                 } else {
                     endIndex = requestedEndIndex;
                     if (endIndex < effectiveStartIndex || endIndex >= paragraphCount) {
-                        onWarn(`Invalid replace_range endParagraphIndex: ${change?.endParagraphIndex}; no-op.`);
+                        onWarn(`Invalid replace_range endParagraphIndex: ${normalizedChange?.endParagraphIndex}; no-op.`);
+                        continue;
+                    }
+                }
+
+                if (!hasStructuralReplacementField(normalizedChange)) {
+                    const replacementCandidate = getReplacementText(normalizedChange, operationName);
+                    const shouldAttemptTableRecovery = requiresTableContent
+                        || isDiagnosticReplacementText(replacementCandidate);
+                    const synthesizedTable = synthesizeMarkdownTableFromSourceRange(
+                        paragraphs.items,
+                        effectiveStartIndex,
+                        endIndex
+                    );
+                    if (shouldAttemptTableRecovery && synthesizedTable) {
+                        normalizedChange.content = synthesizedTable;
+                        onWarn('Synthesized missing table content from the source paragraph range.');
+                    } else {
+                        onWarn(
+                            `Skipping malformed replace_range at P${effectiveStartIndex + 1}: missing required content.`
+                        );
+                        continue;
+                    }
+                }
+            } else if (
+                operationName === 'replace_paragraph'
+                && (requiresTableContent || replacementLooksTableLike(getReplacementText(normalizedChange, operationName)))
+            ) {
+                const inferredEndIndex = inferTableConversionEndIndex(paragraphs.items, effectiveStartIndex);
+                if (inferredEndIndex > effectiveStartIndex) {
+                    operationName = 'replace_range';
+                    normalizedChange.operation = operationName;
+                    normalizedChange.endParagraphIndex = inferredEndIndex + 1;
+                    endIndex = inferredEndIndex;
+                    onWarn(
+                        `Expanded table replacement scope from P${effectiveStartIndex + 1} to P${inferredEndIndex + 1}.`
+                    );
+                }
+            }
+
+            const replacementAfterRangeResolution = getReplacementText(normalizedChange, operationName);
+            if (
+                (operationName === 'replace_paragraph' || operationName === 'replace_range')
+                && isDiagnosticReplacementText(replacementAfterRangeResolution)
+            ) {
+                const synthesizedTable = synthesizeMarkdownTableFromSourceRange(
+                    paragraphs.items,
+                    effectiveStartIndex,
+                    endIndex
+                );
+                if (synthesizedTable) {
+                    normalizedChange.content = synthesizedTable;
+                    onWarn('Replaced diagnostic model output with synthesized table content from the source range.');
+                } else {
+                    onWarn(
+                        `Skipping malformed ${operationName} at P${effectiveStartIndex + 1}: replacement text contains model diagnostics.`
+                    );
+                    continue;
+                }
+            }
+
+            if (
+                (operationName === 'replace_paragraph' || operationName === 'replace_range')
+                && !hasStructuralReplacementField(normalizedChange)
+            ) {
+                onWarn(
+                    `Skipping malformed ${operationName} at P${effectiveStartIndex + 1}: missing required content.`
+                );
+                continue;
+            }
+
+            if (
+                requiresTableContent
+                && (operationName === 'edit_paragraph' || operationName === 'replace_paragraph' || operationName === 'replace_range')
+            ) {
+                const finalReplacementText = getReplacementText(normalizedChange, operationName);
+                const normalizedTableText = normalizeTableReplacementText(finalReplacementText);
+                if (
+                    replacementLooksTableLike(finalReplacementText)
+                    && normalizedTableText !== normalizeReplacementText(finalReplacementText).trim()
+                ) {
+                    setReplacementText(normalizedChange, operationName, normalizedTableText);
+                    onWarn('Normalized final table replacement into markdown table syntax.');
+                }
+
+                const finalContent = getReplacementText(normalizedChange, operationName);
+                if (!isMarkdownTableText(normalizeReplacementText(finalContent).trim())) {
+                    const synthesizedTable = synthesizeMarkdownTableFromSourceRange(
+                        paragraphs.items,
+                        effectiveStartIndex,
+                        endIndex
+                    );
+                    if (synthesizedTable) {
+                        operationName = 'replace_range';
+                        normalizedChange.operation = operationName;
+                        normalizedChange.content = synthesizedTable;
+                        normalizedChange.endParagraphIndex = endIndex + 1;
+                        delete normalizedChange.newContent;
+                        onWarn('Replaced non-table model output with synthesized table content from the source range.');
+                    } else {
+                        onWarn(
+                            `Skipping ${operationName} at P${effectiveStartIndex + 1}: table request did not produce markdown table content.`
+                        );
                         continue;
                     }
                 }
@@ -136,7 +626,7 @@ export async function applyRedlineChangesToWordContext(context, aiChanges, optio
                 ? 1
                 : (endIndex - effectiveStartIndex) + 1;
 
-            const converted = toScopedSharedRedlineOperation(change, {
+            const converted = toScopedSharedRedlineOperation(normalizedChange, {
                 scopeStartText: startParagraph.text || '',
                 scopeParagraphCount,
                 insertionBeforeStart
@@ -166,7 +656,7 @@ export async function applyRedlineChangesToWordContext(context, aiChanges, optio
             if (applied) {
                 changesApplied += 1;
             } else {
-                onWarn(`No changes produced for change: ${JSON.stringify(change)}`);
+                onWarn(`No changes produced for change: ${JSON.stringify(normalizedChange)}`);
             }
         } catch (changeError) {
             onWarn(`Failed to apply change ${JSON.stringify(change)}: ${changeError?.message || changeError}`);
