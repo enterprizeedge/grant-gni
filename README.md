@@ -1,4 +1,4 @@
-# Gemini AI for Office - AI Assistant for Microsoft Word
+# Gemini AI for Office - AI Assistant for Grants
 
 **✨ Available on the Microsoft Marketplace:** [Download Here](https://marketplace.microsoft.com/en-ca/product/saas/wa200009707)
 
