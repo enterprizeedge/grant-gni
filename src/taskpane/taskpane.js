@@ -43,6 +43,7 @@ import {
   executeEditSection
 } from './modules/commands/agentic-tools.js';
 import { setPlatform } from '@ansonlai/docx-redline-js';
+import { initAdvisorPanel } from './modules/advisor/advisor-panel.js';
 
 // Configure marked for GFM (GitHub Flavored Markdown) with tables, breaks, etc.
 marked.setOptions({
@@ -291,6 +292,9 @@ Office.onReady((info) => {
     document.getElementById("settings-button").onclick = showSettingsView;
     document.getElementById("save-api-key").onclick = saveApiKey;
     document.getElementById("back-to-main").onclick = showMainView;
+
+    // Initialize the Advisor panel (grounded suggestions via backend /api/advise)
+    initAdvisorPanel({ resolveBackendUrl: getBackendBaseUrl });
 
     // Add event listener for refresh chat button
     document.getElementById("refresh-chat-button").onclick = refreshChat;
@@ -541,36 +545,51 @@ function refreshChat() {
 }
 
 function saveApiKey() {
-  const apiKey = document.getElementById("api-key-input").value;
+  // BYOK removed in v1: there is no client API key to save. AI access is
+  // managed by the backend, so saving settings no longer requires a key.
   const fastModel = document.getElementById("model-select-fast").value;
   const slowModel = document.getElementById("model-select-slow").value;
   const systemMessage = document.getElementById("system-message-input").value;
   const redlineEnabled = document.getElementById("redline-toggle").checked;
   const redlineAuthor = document.getElementById("redline-author-input").value;
 
-  if (apiKey && apiKey.trim() !== "") {
-    localStorage.setItem("geminiApiKey", apiKey);
-    localStorage.setItem("geminiModelFast", fastModel);
-    localStorage.setItem("geminiModelSlow", slowModel);
-    localStorage.setItem("geminiSystemMessage", systemMessage);
-    saveRedlineSetting(redlineEnabled);
-    saveRedlineAuthor(redlineAuthor);
-    // Glance settings are saved automatically on change
-    showMainView();
-    addMessageToChat("System", "Settings saved successfully.");
-    // Re-run checks with new settings
-    runGlanceChecks();
-  } else {
-    addMessageToChat("System", "API Key cannot be empty.");
-  }
+  localStorage.setItem("geminiModelFast", fastModel);
+  localStorage.setItem("geminiModelSlow", slowModel);
+  localStorage.setItem("geminiSystemMessage", systemMessage);
+  saveRedlineSetting(redlineEnabled);
+  saveRedlineAuthor(redlineAuthor);
+  // Glance settings are saved automatically on change
+  showMainView();
+  addMessageToChat("System", "Settings saved successfully.");
+  // Re-run checks with new settings
+  runGlanceChecks();
+}
+
+// --- Grant Gni backend gateway ---------------------------------------------
+// The add-in no longer calls Google directly. All LLM traffic goes through the
+// Grant Gni backend, which holds the provider key server-side. Override the URL
+// for staging/production by setting localStorage "grantGniBackendUrl".
+const DEFAULT_BACKEND_URL = "https://localhost:3001";
+
+function getBackendBaseUrl() {
+  const override = localStorage.getItem("grantGniBackendUrl");
+  const base = override && override.trim() !== "" ? override.trim() : DEFAULT_BACKEND_URL;
+  return base.replace(/\/+$/, "");
+}
+
+// Builds the gateway endpoint that mirrors Gemini's generateContent. The model
+// is passed as a query param; the request body stays exactly as before, so all
+// existing response parsing keeps working.
+function buildBackendUrl(model) {
+  return `${getBackendBaseUrl()}/api/generate?model=${encodeURIComponent(model || "")}`;
 }
 
 function loadApiKey() {
-  // First check localStorage (user-provided key takes precedence)
-  const storedKey = localStorage.getItem("geminiApiKey");
-  if (storedKey && storedKey.trim() !== "") {
-    return storedKey;
-  }
+  // BYOK removed in v1: the provider key lives in the backend, not the client.
+  // A non-empty sentinel is returned so existing "is the assistant configured?"
+  // gates keep passing. Requests always route through the backend regardless of
+  // any legacy stored key.
+  return "managed-by-backend";
 }
 
 function loadModel(type = 'fast') {
@@ -663,7 +682,8 @@ initAgenticTools({
   restoreChangeTracking,
   SEARCH_LIMITS,
   SAFETY_SETTINGS_BLOCK_NONE,
-  API_LIMITS
+  API_LIMITS,
+  buildBackendUrl
 });
 
 /**
@@ -920,7 +940,7 @@ async function runGlanceChecks() {
     });
 
     const model = loadModel('fast'); // Use fast model for glance checks
-    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`;
+    const apiUrl = buildBackendUrl(model);
 
     // Prepare prompt for dynamic checks
     let questionsPrompt = "";
@@ -1298,7 +1318,7 @@ async function sendChatMessage(modelType = 'fast', messageOverride = null) {
     }
 
     const geminiModel = loadModel(modelType);
-    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${geminiApiKey}`;
+    const apiUrl = buildBackendUrl(geminiModel);
 
     let contextString = "";
     if (docSelection && docSelection.trim() !== "") {

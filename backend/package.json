@@ -1,12 +1,13 @@
 {
   "name": "grant-gni-backend",
   "version": "0.1.0",
-  "description": "Grant Gni backend gateway. Proxies LLM calls (Gemini now, Vertex AI later) so the Word/Excel add-in never holds provider keys. Auth + subscriptions land in v2.",
+  "description": "Grant Gni backend gateway. Proxies LLM calls (Gemini now, Vertex AI later) so the Word/Excel add-in never holds provider keys. Auth + subscriptions land last.",
   "type": "module",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "node --watch src/server.js"
+    "dev": "node --watch src/server.js",
+    "ingest": "node src/knowledge/ingest.js"
   },
   "license": "MIT",
   "dependencies": {

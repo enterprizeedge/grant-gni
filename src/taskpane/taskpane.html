@@ -5,7 +5,7 @@
   <meta charset="UTF-8" />
   <meta http-equiv="X-UA-Compatible" content="IE=Edge" />
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AI Contract Reviewer</title>
+  <title>Grant Gni</title>
   <!-- Office JavaScript API -->
   <script type="text/javascript" src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 
@@ -16,12 +16,36 @@
 
   <!-- Your Add-in's CSS -->
   <link rel="stylesheet" href="taskpane.css" type="text/css" />
+
+  <!-- Advisor panel styles -->
+  <style>
+    #advisor-open { right: 84px; }
+    .advisor-card {
+      border: 1px solid #e1dfdd;
+      border-left: 3px solid var(--primary-color, #0078d4);
+      border-radius: 6px;
+      padding: 10px 12px;
+      margin-bottom: 10px;
+      background: #faf9f8;
+    }
+    .advisor-issue { font-weight: 600; margin-bottom: 4px; }
+    .advisor-suggestion { margin-bottom: 6px; }
+    .advisor-rationale { font-size: 12px; opacity: 0.85; }
+    .advisor-basedon { font-size: 11px; opacity: 0.6; margin-top: 6px; }
+    .advisor-sources { margin-top: 10px; font-size: 12px; }
+    .advisor-sources summary { cursor: pointer; opacity: 0.8; }
+    .advisor-loading, .advisor-empty, .advisor-error { font-size: 13px; opacity: 0.9; }
+    .advisor-error { color: #a4262c; }
+  </style>
 </head>
 
 <body class="ms-font-m ms-welcome">
 
   <!-- Refresh Button -->
   <button id="refresh-chat-button" title="Clear chat and start new">&#8635;</button> <!-- Refresh icon -->
+
+  <!-- Advisor Button -->
+  <button id="advisor-open" title="Advisor — review against winning proposals">&#9733;</button> <!-- Star icon -->
 
   <!-- Settings Icon -->
   <button id="settings-button" title="Settings">&#9881;</button> <!-- Gear icon -->
@@ -35,7 +59,7 @@
           <div class="chat-message system">Welcome! Ask me to assist you in editing this document.</div>
         </div>
         <div id="chat-input-area">
-          <textarea id="chat-input" placeholder="Ask Gemini..."></textarea>
+          <textarea id="chat-input" placeholder="Ask Grant Gni..."></textarea>
           <div id="button-container">
             <button id="send-button" class="ms-Button" title="Send (Fast)">
               <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
@@ -84,9 +108,12 @@
   <div id="settings-view" class="view-container" style="display: none;">
 
     <h3>Settings</h3>
-    <label for="api-key-input">Google Gemini <a href="https://aistudio.google.com/app/api-keys" target="_blank">API
-        Key</a>:</label>
-    <input type="password" id="api-key-input" class="ms-TextField-field">
+    <p id="managed-key-note" style="font-size: 12px; opacity: 0.8; margin: 4px 0 12px;">
+      AI access is managed by your Grant Gni subscription &mdash; no API key needed.
+    </p>
+    <!-- BYOK removed in v1. Hidden field retained so legacy scripts that reference
+         it don't error; it is no longer used for routing. -->
+    <input type="hidden" id="api-key-input" value="">
     <br />
     <label for="system-message-input">System Message:</label>
     <textarea id="system-message-input" class="ms-TextField-field" rows="6"
@@ -167,6 +194,37 @@
     <br />
     <button id="save-api-key" class="ms-Button ms-Button--primary">Save</button>
     <button id="back-to-main" class="ms-Button">Back</button>
+  </div>
+
+  <!-- Advisor View (Hidden by default) -->
+  <div id="advisor-view" class="view-container" style="display: none;">
+    <h3>Advisor</h3>
+    <p class="settings-hint">Review your selected section against winning proposals, the
+      program template, and the call's strategic intent. Select text first, or the whole
+      document is reviewed.</p>
+
+    <label for="advisor-program">Funding program:</label>
+    <select id="advisor-program" class="ms-TextField-field">
+      <option value="horizon-europe" selected>Horizon Europe</option>
+    </select>
+    <br />
+    <label for="advisor-section">Section:</label>
+    <select id="advisor-section" class="ms-TextField-field">
+      <option value="">(auto / any)</option>
+      <option value="excellence">Excellence</option>
+      <option value="impact">Impact</option>
+      <option value="implementation">Implementation</option>
+    </select>
+    <br />
+    <label for="advisor-call">Call ID (optional):</label>
+    <input type="text" id="advisor-call" class="ms-TextField-field"
+      placeholder="e.g. HORIZON-CL5-2026-D3-01-SYNTH">
+    <br /><br />
+
+    <button id="advisor-run" class="ms-Button ms-Button--primary">Get advice</button>
+    <button id="advisor-back" class="ms-Button">Back</button>
+
+    <div id="advisor-results" style="margin-top: 16px;"></div>
   </div>
 
   <div id="sideload-msg" style="display:none">

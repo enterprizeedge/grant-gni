@@ -1,12 +1,15 @@
-// Grant Gni backend gateway — v1
+// Grant Gni backend gateway
 // ---------------------------------------------------------------------------
-// Purpose: the Word/Excel add-in calls THIS server instead of calling Google
-// directly. The provider key lives here, server-side. This is the seam where
-// v2 (auth + Stripe metering) and v3 (Vertex AI, RAG retrieval) plug in.
+// The Word/Excel add-in calls THIS server instead of calling Google directly.
+// The provider key lives here, server-side. This is the seam where the
+// monetization phase (auth + Stripe metering) and the knowledge layer (Vertex
+// AI, RAG retrieval) plug in.
 //
 // Endpoints:
-//   GET  /health                      -> liveness + provider config status
+//   GET  /health                      -> liveness + provider/knowledge status
 //   POST /api/generate?model=<model>  -> proxy to the LLM, returns JSON verbatim
+//   POST /api/retrieve                -> raw vector retrieval (debug/future use)
+//   POST /api/advise                  -> grounded, evaluator-style suggestions
 // ---------------------------------------------------------------------------
 
 import fs from "node:fs";
@@ -17,6 +20,8 @@ import cors from "cors";
 import dotenv from "dotenv";
 
 import { createGeminiProvider } from "./providers/gemini.js";
+import { retrieve, storeStatus } from "./knowledge/retriever.js";
+import { advise } from "./knowledge/advisor.js";
 
 dotenv.config();
 
@@ -27,7 +32,7 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "https://localhost:3000"
   .map((s) => s.trim())
   .filter(Boolean);
 
-// ── Provider selection (v1 supports gemini; vertex slots in here later) ──────
+// ── Provider selection (gemini now; vertex slots in here later) ──────────────
 function buildProvider() {
   const which = (process.env.LLM_PROVIDER || "gemini").toLowerCase();
   switch (which) {
@@ -46,8 +51,7 @@ app.use(express.json({ limit: "12mb" })); // documents can be large
 app.use(
   cors({
     origin(origin, cb) {
-      // allow same-origin / non-browser tools (no Origin header)
-      if (!origin) return cb(null, true);
+      if (!origin) return cb(null, true); // same-origin / non-browser tools
       if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
       return cb(new Error(`Origin not allowed by CORS: ${origin}`));
     },
@@ -56,28 +60,32 @@ app.use(
 );
 
 app.get("/health", (_req, res) => {
+  let knowledge = null;
+  try {
+    knowledge = storeStatus();
+  } catch {
+    knowledge = { size: 0 };
+  }
   res.json({
     ok: true,
     service: "grant-gni-backend",
-    version: "0.1.0",
+    version: "0.2.0",
     provider: provider.name,
     providerConfigured: provider.isConfigured(),
+    knowledge,
   });
 });
 
 // Mirror of Gemini's generateContent. The add-in sends the same body it used to
-// send to Google; we add the key and forward. Response is returned verbatim so
-// the add-in's parsing logic is unchanged.
+// send to Google; we add the key and forward. Response returned verbatim.
 app.post("/api/generate", async (req, res) => {
-  // NOTE (v2): authenticate the request (JWT) and check the user's subscription
-  // + usage quota here before forwarding. Then log usage for billing/analytics.
+  // NOTE (monetization phase): authenticate + check quota + log usage here.
   const model = req.query.model || (req.body && req.body.model) || "gemini-flash-latest";
 
   if (!provider.isConfigured()) {
     return res.status(502).json({
       error: {
-        message:
-          "LLM provider not configured. Set GEMINI_API_KEY in backend/.env and restart.",
+        message: "LLM provider not configured. Set GEMINI_API_KEY in backend/.env and restart.",
       },
     });
   }
@@ -87,9 +95,40 @@ app.post("/api/generate", async (req, res) => {
     res.status(status).type("application/json").send(body);
   } catch (err) {
     console.error("[/api/generate] proxy error:", err);
-    res
-      .status(502)
-      .json({ error: { message: `Upstream provider error: ${err.message}` } });
+    res.status(502).json({ error: { message: `Upstream provider error: ${err.message}` } });
+  }
+});
+
+// Raw retrieval (debugging / future features). body: { query, topK?, filter? }
+app.post("/api/retrieve", async (req, res) => {
+  try {
+    const { query, topK, filter } = req.body || {};
+    if (!query) return res.status(400).json({ error: { message: "query is required" } });
+    const hits = await retrieve(String(query), { topK, filter });
+    res.json({ hits });
+  } catch (err) {
+    res.status(500).json({ error: { message: err.message } });
+  }
+});
+
+// Grounded advisor. body: { sectionText, program, section?, callId? }
+app.post("/api/advise", async (req, res) => {
+  // NOTE (monetization phase): auth + quota check + usage logging go here too.
+  const { sectionText, program, section, callId } = req.body || {};
+  if (!sectionText || !sectionText.trim()) {
+    return res.status(400).json({ error: { message: "sectionText is required" } });
+  }
+  if (!provider.isConfigured()) {
+    return res.status(502).json({
+      error: { message: "LLM provider not configured. Set GEMINI_API_KEY in backend/.env." },
+    });
+  }
+  try {
+    const result = await advise({ provider, sectionText, program, section, callId });
+    res.json(result);
+  } catch (err) {
+    console.error("[/api/advise] error:", err);
+    res.status(502).json({ error: { message: err.message } });
   }
 });
 
@@ -99,10 +138,7 @@ function start() {
     const certPath = process.env.SSL_CERT_PATH;
     const keyPath = process.env.SSL_KEY_PATH;
     if (certPath && keyPath && fs.existsSync(certPath) && fs.existsSync(keyPath)) {
-      const creds = {
-        cert: fs.readFileSync(certPath),
-        key: fs.readFileSync(keyPath),
-      };
+      const creds = { cert: fs.readFileSync(certPath), key: fs.readFileSync(keyPath) };
       https.createServer(creds, app).listen(PORT, () => {
         console.log(`Grant Gni backend (HTTPS) on https://localhost:${PORT}`);
         console.log(`  provider=${provider.name} configured=${provider.isConfigured()}`);

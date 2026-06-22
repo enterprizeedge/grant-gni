@@ -29,6 +29,7 @@ let setChangeTrackingForAi;
 let restoreChangeTracking;
 let SAFETY_SETTINGS_BLOCK_NONE;
 let API_LIMITS;
+let buildBackendUrl;
 
 function initAgenticTools(deps) {
   ({
@@ -40,7 +41,8 @@ function initAgenticTools(deps) {
     setChangeTrackingForAi,
     restoreChangeTracking,
     SAFETY_SETTINGS_BLOCK_NONE,
-    API_LIMITS
+    API_LIMITS,
+    buildBackendUrl
   } = deps);
 }
 
@@ -238,9 +240,8 @@ Return ONLY the JSON array, nothing else:`;
 }
 // Helper for the Diff generation (specialized prompt)
 async function callGeminiForDiffs(prompt) {
-  const geminiApiKey = loadApiKey();
   const geminiModel = loadModel();
-  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${geminiApiKey}`;
+  const apiUrl = buildBackendUrl(geminiModel);
 
   const jsonSchema = {
     type: "ARRAY",
@@ -642,9 +643,8 @@ function createToolResult(count, itemType, zeroMessage) {
 
 // Generic helper for JSON responses
 async function callGeminiForJSON(prompt, schema) {
-  const geminiApiKey = loadApiKey();
   const geminiModel = loadModel();
-  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${geminiApiKey}`;
+  const apiUrl = buildBackendUrl(geminiModel);
 
   const systemInstruction = {
     parts: [{ text: loadSystemMessage() }]
@@ -695,9 +695,8 @@ async function callGeminiForJSON(prompt, schema) {
 
 
 async function executeResearch(query) {
-  const geminiApiKey = loadApiKey();
   const geminiModel = loadModel();
-  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${geminiApiKey}`;
+  const apiUrl = buildBackendUrl(geminiModel);
 
   const tools = [{ google_search: {} }];
 
