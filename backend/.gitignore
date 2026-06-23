@@ -3,3 +3,8 @@ node_modules/
 *.pem
 *.key
 *.crt
+
+# Generated vector stores + per-client private uploads (never commit client data)
+data/
+# Local test scratch
+_t.mjs

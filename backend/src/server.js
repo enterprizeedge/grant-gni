@@ -6,10 +6,13 @@
 // AI, RAG retrieval) plug in.
 //
 // Endpoints:
-//   GET  /health                      -> liveness + provider/knowledge status
-//   POST /api/generate?model=<model>  -> proxy to the LLM, returns JSON verbatim
-//   POST /api/retrieve                -> raw vector retrieval (debug/future use)
-//   POST /api/advise                  -> grounded, evaluator-style suggestions
+//   GET  /health                          -> liveness + provider/knowledge status
+//   POST /api/generate?model=<model>      -> proxy to the LLM, returns JSON verbatim
+//   POST /api/retrieve                    -> raw vector retrieval (debug/future use)
+//   POST /api/advise                      -> grounded, evaluator-style suggestions
+//   POST   /api/tenant/:id/documents      -> upload + ingest a client's private file
+//   GET    /api/tenant/:id/status         -> a client's private KB status
+//   DELETE /api/tenant/:id/documents      -> clear a client's private KB (GDPR delete)
 // ---------------------------------------------------------------------------
 
 import fs from "node:fs";
@@ -20,8 +23,11 @@ import cors from "cors";
 import dotenv from "dotenv";
 
 import { createGeminiProvider } from "./providers/gemini.js";
-import { retrieve, storeStatus } from "./knowledge/retriever.js";
+import { retrieve, storeStatus, invalidateStore } from "./knowledge/retriever.js";
 import { advise } from "./knowledge/advisor.js";
+import { ingestTenantText } from "./knowledge/ingest.js";
+import { extractText } from "./knowledge/extract.js";
+import { sanitizeTenantId, tenantDir, tenantStorePath, tenantUploadsDir } from "./knowledge/tenancy.js";
 
 dotenv.config();
 
@@ -47,7 +53,7 @@ function buildProvider() {
 const provider = buildProvider();
 
 const app = express();
-app.use(express.json({ limit: "12mb" })); // documents can be large
+app.use(express.json({ limit: "25mb" })); // documents (base64) can be large
 app.use(
   cors({
     origin(origin, cb) {
@@ -55,7 +61,7 @@ app.use(
       if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
       return cb(new Error(`Origin not allowed by CORS: ${origin}`));
     },
-    methods: ["GET", "POST", "OPTIONS"],
+    methods: ["GET", "POST", "DELETE", "OPTIONS"],
   })
 );
 
@@ -69,27 +75,22 @@ app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "grant-gni-backend",
-    version: "0.2.0",
+    version: "0.3.0",
     provider: provider.name,
     providerConfigured: provider.isConfigured(),
     knowledge,
   });
 });
 
-// Mirror of Gemini's generateContent. The add-in sends the same body it used to
-// send to Google; we add the key and forward. Response returned verbatim.
+// Mirror of Gemini's generateContent. Body passed through; response verbatim.
 app.post("/api/generate", async (req, res) => {
   // NOTE (monetization phase): authenticate + check quota + log usage here.
   const model = req.query.model || (req.body && req.body.model) || "gemini-flash-latest";
-
   if (!provider.isConfigured()) {
     return res.status(502).json({
-      error: {
-        message: "LLM provider not configured. Set GEMINI_API_KEY in backend/.env and restart.",
-      },
+      error: { message: "LLM provider not configured. Set GEMINI_API_KEY in backend/.env and restart." },
     });
   }
-
   try {
     const { status, body } = await provider.generateContent(String(model), req.body);
     res.status(status).type("application/json").send(body);
@@ -99,22 +100,22 @@ app.post("/api/generate", async (req, res) => {
   }
 });
 
-// Raw retrieval (debugging / future features). body: { query, topK?, filter? }
+// Raw retrieval. body: { query, topK?, filter?, tenantId? }
 app.post("/api/retrieve", async (req, res) => {
   try {
-    const { query, topK, filter } = req.body || {};
+    const { query, topK, filter, tenantId } = req.body || {};
     if (!query) return res.status(400).json({ error: { message: "query is required" } });
-    const hits = await retrieve(String(query), { topK, filter });
+    const hits = await retrieve(String(query), { topK, filter, tenantId: tenantId || null });
     res.json({ hits });
   } catch (err) {
     res.status(500).json({ error: { message: err.message } });
   }
 });
 
-// Grounded advisor. body: { sectionText, program, section?, callId? }
+// Grounded review. body: { sectionText, program, section?, callId?, tenantId? }
 app.post("/api/advise", async (req, res) => {
   // NOTE (monetization phase): auth + quota check + usage logging go here too.
-  const { sectionText, program, section, callId } = req.body || {};
+  const { sectionText, program, section, callId, tenantId } = req.body || {};
   if (!sectionText || !sectionText.trim()) {
     return res.status(400).json({ error: { message: "sectionText is required" } });
   }
@@ -124,11 +125,78 @@ app.post("/api/advise", async (req, res) => {
     });
   }
   try {
-    const result = await advise({ provider, sectionText, program, section, callId });
+    const result = await advise({ provider, sectionText, program, section, callId, tenantId: tenantId || null });
     res.json(result);
   } catch (err) {
     console.error("[/api/advise] error:", err);
     res.status(502).json({ error: { message: err.message } });
+  }
+});
+
+// ── Per-client private knowledge base (upload-only, isolated) ────────────────
+
+// Upload one document into a client's private KB.
+// body: { filename, contentBase64? | text?, program?, docType?, section? }
+app.post("/api/tenant/:id/documents", async (req, res) => {
+  let id;
+  try {
+    id = sanitizeTenantId(req.params.id);
+  } catch (e) {
+    return res.status(400).json({ error: { message: e.message } });
+  }
+  if (!provider.isConfigured()) {
+    return res.status(502).json({ error: { message: "Set GEMINI_API_KEY (used for embeddings) in backend/.env." } });
+  }
+  try {
+    const { filename, contentBase64, text, program, docType, section } = req.body || {};
+    if (!filename) return res.status(400).json({ error: { message: "filename is required" } });
+    let extracted = text;
+    if (!extracted) {
+      if (!contentBase64) return res.status(400).json({ error: { message: "contentBase64 or text is required" } });
+      const buffer = Buffer.from(String(contentBase64).replace(/^data:[^;]+;base64,/, ""), "base64");
+      extracted = extractText(filename, buffer);
+    }
+    const result = await ingestTenantText(id, { filename, text: extracted, program, docType, section });
+    res.json(result);
+  } catch (err) {
+    console.error("[/api/tenant upload] error:", err);
+    res.status(400).json({ error: { message: err.message } });
+  }
+});
+
+// A client's private KB status + uploaded file list.
+app.get("/api/tenant/:id/status", (req, res) => {
+  let id;
+  try {
+    id = sanitizeTenantId(req.params.id);
+  } catch (e) {
+    return res.status(400).json({ error: { message: e.message } });
+  }
+  let uploads = [];
+  try {
+    const dir = tenantUploadsDir(id);
+    if (fs.existsSync(dir)) uploads = fs.readdirSync(dir);
+  } catch {
+    uploads = [];
+  }
+  res.json({ ...storeStatus(id), uploads });
+});
+
+// GDPR deletion: wipe a client's private KB entirely.
+app.delete("/api/tenant/:id/documents", (req, res) => {
+  let id;
+  try {
+    id = sanitizeTenantId(req.params.id);
+  } catch (e) {
+    return res.status(400).json({ error: { message: e.message } });
+  }
+  try {
+    const dir = tenantDir(id);
+    if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+    invalidateStore(tenantStorePath(id));
+    res.json({ ok: true, tenantId: id, deleted: true });
+  } catch (err) {
+    res.status(500).json({ error: { message: err.message } });
   }
 });
 
@@ -147,8 +215,7 @@ function start() {
       return;
     }
     console.warn(
-      "[boot] USE_HTTPS=true but SSL_CERT_PATH/SSL_KEY_PATH are missing or invalid; " +
-        "falling back to HTTP. See V1_SETUP.md to generate localhost certs."
+      "[boot] USE_HTTPS=true but SSL_CERT_PATH/SSL_KEY_PATH are missing or invalid; falling back to HTTP."
     );
   }
   http.createServer(app).listen(PORT, () => {

@@ -1,52 +1,69 @@
-// Retrieval helper shared by /api/retrieve and /api/advise.
-// Loads the store once, embeds the query with the same provider, returns top-k.
-
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+// Retrieval across two isolated layers:
+//   - GLOBAL store: shared program/template/call knowledge (data/global/...)
+//   - TENANT store: a single client's private uploads (data/tenants/<id>/...)
+// A tenant query searches BOTH and merges; a tenant NEVER sees another tenant's store.
 
 import { createEmbeddingProvider } from "./embeddings.js";
 import { FileVectorStore } from "./vector-store.js";
+import { GLOBAL_STORE_PATH, tenantStorePath, sanitizeTenantId } from "./tenancy.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const STORE_PATH = path.resolve(__dirname, "../../data/vector-store.json");
-
-let storeSingleton = null;
+const storeCache = new Map(); // path -> FileVectorStore
 let providerSingleton = null;
 
-function getStore() {
-  if (!storeSingleton) {
-    storeSingleton = new FileVectorStore(STORE_PATH).load();
-  }
-  return storeSingleton;
+function getStore(path) {
+  if (!storeCache.has(path)) storeCache.set(path, new FileVectorStore(path).load());
+  return storeCache.get(path);
 }
-
 function getProvider() {
   if (!providerSingleton) providerSingleton = createEmbeddingProvider();
   return providerSingleton;
 }
 
-export function storeStatus() {
-  const store = getStore();
-  return {
-    size: store.size(),
-    embedProvider: store.meta.embedProvider,
-    dim: store.meta.dim,
-    queryProvider: getProvider().name,
-  };
+// Force a reload (after ingestion writes new data for a tenant/global).
+export function invalidateStore(path) {
+  storeCache.delete(path);
 }
 
-// query: string; opts: { topK, filter }
-export async function retrieve(query, opts = {}) {
-  const store = getStore();
-  if (store.size() === 0) {
-    throw new Error("Vector store is empty. Run `npm run ingest` first.");
+export function storeStatus(tenantId) {
+  const global = getStore(GLOBAL_STORE_PATH);
+  const status = {
+    queryProvider: getProvider().name,
+    global: { size: global.size(), embedProvider: global.meta.embedProvider, dim: global.meta.dim },
+  };
+  if (tenantId) {
+    const t = getStore(tenantStorePath(sanitizeTenantId(tenantId)));
+    status.tenant = { tenantId: sanitizeTenantId(tenantId), size: t.size() };
   }
+  status.size = global.size() + (status.tenant ? status.tenant.size : 0);
+  return status;
+}
+
+// retrieve(query, { topK, filter, tenantId })
+export async function retrieve(query, opts = {}) {
+  const { topK = 5, filter = null, tenantId = null } = opts;
   const provider = getProvider();
   const [vector] = await provider.embed([query]);
-  const hits = store.query(vector, { topK: opts.topK || 5, filter: opts.filter || null });
-  return hits.map((h) => ({
-    score: Number(h.score.toFixed(4)),
-    text: h.text,
-    metadata: h.metadata,
-  }));
+
+  const collected = [];
+  const global = getStore(GLOBAL_STORE_PATH);
+  for (const h of global.query(vector, { topK, filter })) collected.push({ ...h, origin: "global" });
+
+  if (tenantId) {
+    const tenant = getStore(tenantStorePath(sanitizeTenantId(tenantId)));
+    for (const h of tenant.query(vector, { topK, filter })) collected.push({ ...h, origin: "private" });
+  }
+
+  if (collected.length === 0 && global.size() === 0) {
+    throw new Error("Knowledge base is empty. Run `npm run ingest` (global) and/or upload client documents.");
+  }
+
+  return collected
+    .sort((a, b) => b.score - a.score)
+    .slice(0, topK)
+    .map((h) => ({
+      score: Number(h.score.toFixed(4)),
+      text: h.text,
+      origin: h.origin,
+      metadata: h.metadata,
+    }));
 }
