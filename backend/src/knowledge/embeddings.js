@@ -1,11 +1,39 @@
-// Embeddings — swappable providers.
-// 'local'  : deterministic, offline, no key. Bag-of-words feature-hashing into a
-//            fixed-dim L2-normalised vector. Good enough to prove retrieval in dev.
-// 'gemini' : real semantic embeddings via Google (uses the backend's key).
+// Embeddings — a standalone layer, deliberately decoupled from the LLM.
+// ---------------------------------------------------------------------------
+// WHY THIS IS SEPARATE FROM THE LLM:
+//   The chat/Review LLM (LLM_PROVIDER / model query-param) and the embedding
+//   model (EMBED_PROVIDER / EMBED_MODEL) are configured independently. Changing
+//   or swapping the LLM has ZERO effect on the vectors stored in the vector DB.
+//   The only thing that must stay consistent is the *embedding* model: the query
+//   embedding and the stored document embeddings must come from the same model
+//   and dimensionality. The vector store records which model/dim produced it
+//   (see vector-store meta + the dim guard in retriever.js), so a mismatch is
+//   detected instead of silently degrading retrieval.
 //
-// Vertex AI embeddings slot in later as a third provider with the same interface.
+// PROVIDERS:
+//   'local'  : deterministic, offline, no key. Feature-hashed bag-of-words.
+//              For dev/tests only — low quality, but lets retrieval run with no key.
+//   'gemini' : Google's text embeddings. Default model `gemini-embedding-001`
+//              (state-of-the-art on the MTEB multilingual leaderboard), with
+//              Matryoshka output dims (768 / 1536 / 3072) selectable via EMBED_DIM.
+//
+// To switch the vector DB backend later (pgvector / Vertex AI Vector Search),
+// only vector-store.js changes — this file's interface stays the same.
+// ---------------------------------------------------------------------------
 
 const LOCAL_DIM = 256;
+
+// Known native output dimensionality per Gemini embedding model. gemini-embedding-001
+// defaults to 3072 but supports Matryoshka truncation to smaller sizes.
+const GEMINI_DEFAULT_DIMS = {
+  "gemini-embedding-001": 3072,
+  "text-embedding-004": 768,
+};
+
+function l2normalize(vec) {
+  const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0)) || 1;
+  return vec.map((v) => v / norm);
+}
 
 function hashToken(token) {
   // FNV-1a
@@ -29,14 +57,13 @@ function localEmbed(text) {
     const sign = (hashToken(tok + "#") & 1) === 0 ? 1 : -1;
     vec[idx] += sign;
   }
-  // L2 normalise
-  const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0)) || 1;
-  return vec.map((v) => v / norm);
+  return l2normalize(vec);
 }
 
 function createLocalProvider() {
   return {
     name: "local",
+    model: "local-hash",
     dim: LOCAL_DIM,
     isConfigured: () => true,
     async embed(texts) {
@@ -45,31 +72,44 @@ function createLocalProvider() {
   };
 }
 
-function createGeminiProvider({ apiKey, apiBase, model }) {
+function createGeminiProvider({ apiKey, apiBase, model, dim }) {
   const base = (apiBase || "https://generativelanguage.googleapis.com/v1beta").replace(/\/+$/, "");
-  const m = model || "text-embedding-004";
+  const m = model || "gemini-embedding-001";
+  const nativeDim = GEMINI_DEFAULT_DIMS[m] || 3072;
+  // Optional Matryoshka truncation. Only sent when smaller than the native dim.
+  const outputDim = dim && dim > 0 && dim < nativeDim ? dim : nativeDim;
+
   return {
     name: "gemini",
-    dim: 768, // text-embedding-004
+    model: m,
+    dim: outputDim,
     isConfigured: () => Boolean(apiKey),
-    async embed(texts) {
-      // Sequential to stay well under rate limits for a dev-sized corpus.
+    // texts: string[]; opts.taskType: "RETRIEVAL_DOCUMENT" (ingest) | "RETRIEVAL_QUERY" (search)
+    async embed(texts, opts = {}) {
+      const taskType = opts.taskType || null;
       const out = [];
+      // Sequential keeps us well under rate limits for a dev-sized corpus.
       for (const text of texts) {
         const url = `${base}/models/${m}:embedContent?key=${apiKey}`;
+        const reqBody = {
+          model: `models/${m}`,
+          content: { parts: [{ text }] },
+        };
+        if (taskType) reqBody.taskType = taskType;
+        if (outputDim < nativeDim) reqBody.outputDimensionality = outputDim;
         const res = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            model: `models/${m}`,
-            content: { parts: [{ text }] },
-          }),
+          body: JSON.stringify(reqBody),
         });
         if (!res.ok) {
           throw new Error(`Gemini embeddings failed (${res.status}): ${await res.text()}`);
         }
         const json = await res.json();
-        out.push(json.embedding.values);
+        let values = json.embedding.values;
+        // Google recommends re-normalising when a non-native dimensionality is used.
+        if (outputDim < nativeDim) values = l2normalize(values);
+        out.push(values);
       }
       return out;
     },
@@ -82,7 +122,8 @@ export function createEmbeddingProvider(env = process.env) {
     return createGeminiProvider({
       apiKey: env.GEMINI_API_KEY,
       apiBase: env.GEMINI_API_BASE,
-      model: env.EMBED_MODEL,
+      model: env.EMBED_MODEL || "gemini-embedding-001",
+      dim: Number(env.EMBED_DIM) || 0,
     });
   }
   return createLocalProvider();

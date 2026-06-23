@@ -9,6 +9,12 @@ This document is the single source of truth for how the system works, how to ins
 run, update, and deploy it (locally and in the cloud), and the trade-offs between a
 Cloudflare and a GCP deployment. It is written to be uploaded to GitHub as-is.
 
+> 📘 **Companion guide:** step-by-step cloud setup lives in
+> **[Grant Gni — Complete Deployment Guide](./Grant%20Gni%20-%20Complete%20Deployment%20Guide.docx)**
+> (`Grant Gni - Complete Deployment Guide.docx`, in the project root). Read it alongside
+> sections 12–16 here. When you buy your own domain, follow the
+> [Domain-name migration checklist](#22-domain-name-migration-checklist) in section 22.
+
 ---
 
 ## Table of contents
@@ -33,6 +39,8 @@ Cloudflare and a GCP deployment. It is written to be uploaded to GitHub as-is.
 18. [Roadmap & monetization](#18-roadmap--monetization)
 19. [Troubleshooting](#19-troubleshooting)
 20. [Glossary](#20-glossary)
+21. [Recent changes (changelog)](#21-recent-changes-changelog)
+22. [Domain-name migration checklist](#22-domain-name-migration-checklist)
 
 ---
 
@@ -748,6 +756,11 @@ logging at `/api/generate` and `/api/advise`).
 | Office blocks calls to the backend domain | Add the domain to `<AppDomains>` in `manifest.xml`. |
 | Add-in won't sideload | Trust the dev cert (`npx office-addin-dev-certs install`); ensure port 3000 is free; clear Office cache. |
 | Changed `EMBED_PROVIDER` and retrieval broke | Stored and query vectors must match — re-run `npm run ingest`. |
+| KB upload says **"Upload error: Failed to fetch"** | A CORS pre-flight failure, not a real upload error. Fixed in the backend (it now reflects the origin and never throws on pre-flight). Make sure the deployed backend includes this fix and that `ALLOWED_ORIGINS` is `*` or includes the add-in origin. |
+| Review shows **"The review service is busy right now"** | The LLM returned a transient `503 UNAVAILABLE` ("high demand"). The backend now retries and **falls back** through `LLM_FALLBACK_MODELS`. If it still appears, every fallback model was overloaded at once — wait and retry. Check Cloud Run logs for the `[advise] upstream failed …` line to confirm. |
+| Choosing a **section** (Excellence/Impact/…) gave the busy error while **auto/any** worked | Same transient 503 as above (the section choice doesn't change the call shape). Section retrieval now also **broadens** to all sections when a section has no exemplars, so it's never worse than auto. |
+| After clicking **Back** in Review the pane is blank | Fixed: the main view kept a leftover `view-hidden` class (opacity 0). `hideReviewView()` now clears it and restores the top buttons. |
+| **"Document is too large"** when editing the whole proposal | The cap was raised from 30k to ~450k words (Gemini 2.5 has a ~1M-token context). Only truly enormous documents are now blocked. |
 
 ---
 
@@ -762,6 +775,112 @@ logging at `/api/generate` and `/api/advise`).
 - **Redline** — a tracked change in Word, produced via `@ansonlai/docx-redline-js`.
 - **Call** — a specific funding opportunity (with its own scope and strategic intent).
 - **Program** — a funding framework (Horizon Europe, Innovation Norway, RCN, EIC, …).
+
+---
+
+## 21. Recent changes (changelog)
+
+These changes were made to stabilise the product before the next stage. They affect the
+add-in (`src/`), the backend (`backend/`), and `manifest.xml`. After pulling them, push
+to `main` so the GitHub Actions → Cloud Run pipeline redeploys the backend, then
+re-sideload the updated `manifest.xml` in Word.
+
+### Reliability
+
+- **LLM fallback layer** (`backend/src/providers/resilience.js`). Every LLM call (chat
+  **and** Review) now retries with exponential backoff on `503 "high demand"` / `429` /
+  transient errors, then automatically **falls back** through a model chain
+  (`LLM_FALLBACK_MODELS`, default `gemini-2.5-flash, gemini-flash-latest,
+  gemini-2.5-flash-lite`). This is the fix for the *"This model is currently experiencing
+  high demand"* error your clients were seeing. Configure via `LLM_FALLBACK_MODELS` and
+  `LLM_RETRIES_PER_MODEL`; the response includes an `X-Model-Used` header when a fallback
+  was used.
+- **CORS hardened** (`backend/src/server.js`). The old config *threw* for non-allow-listed
+  origins, which made the pre-flight `OPTIONS` fail with a 500 and surfaced to the add-in
+  as *"Upload error: Failed to fetch"* on knowledge-base uploads. It now reflects the
+  request origin (safe — no cookies are sent), never throws, and answers all pre-flights.
+  Default `ALLOWED_ORIGINS=*`; set a specific list once your production origin is fixed.
+- **Review failures are user-friendly.** The add-in no longer prints raw provider codes;
+  it shows *"The review service is busy right now…"* and logs the real upstream status
+  server-side (`[advise] upstream failed …`) for diagnosis.
+- **Section reviews broadened.** Choosing Excellence/Impact/Implementation now falls back
+  to all-section retrieval when that section has no exemplars, so it is never worse than
+  "auto / any".
+
+### Knowledge / embeddings (decoupled from the LLM)
+
+- **Embedding layer is now fully independent of the LLM.** The chat/Review model and the
+  embedding model are configured separately; changing the LLM has **zero** effect on the
+  vectors in the vector DB. Only `EMBED_PROVIDER` / `EMBED_MODEL` / `EMBED_DIM` define
+  embeddings.
+- **Best-in-class model selected:** default `EMBED_MODEL=gemini-embedding-001` (top of the
+  MTEB multilingual leaderboard), with Matryoshka output dims (`EMBED_DIM`, default
+  `1536`). `text-embedding-004` remains available; `gemini-embedding-2` (multimodal) is a
+  future option.
+- **Safety guard:** the vector store records the model/dim it was built with, and
+  retrieval **skips any store whose dim no longer matches** the current embedding model
+  (instead of silently returning nonsense). Switching `EMBED_MODEL`/`EMBED_DIM` therefore
+  requires `npm run ingest` (global) and re-uploading tenant documents.
+  - ⚠️ **Activation in production is a deliberate, manual step** so grounding isn't
+    silently disabled: set `EMBED_PROVIDER=gemini`, `EMBED_MODEL=gemini-embedding-001`,
+    `EMBED_DIM=1536` on the Cloud Run service, **then** re-run `npm run ingest` and have
+    clients re-upload. The reliability/CORS fixes need no config and ship automatically.
+
+### UI / UX
+
+- **Review button** enlarged (real vertical padding + min-height).
+- **"Glance" renamed to "Checklist"** throughout the visible UI.
+- **Fast / Slow model roles** explained inline in Settings (Fast = everyday chat/Send;
+  Slow = "Think" deep reasoning; auto-fallback noted).
+- **Large-document cap raised** from 30k to ~450k words so whole-proposal edits work.
+- **Right-click menu** (the dev "Reload / Attach Debugger / Security Info") replaced with a
+  user menu: **Help & Guide, Privacy Policy, Get Support, Reload**.
+- **Back button** in Review now reliably returns to the chat/checklist view.
+
+### Branding (`manifest.xml`)
+
+- `ProviderName` **Recurve Law → Zavion Technologies** (this is the name shown in the
+  ribbon's add-in flyout menu).
+- `SupportUrl` / `AppDomain` moved off `reference.legal` to placeholder
+  `zaviontechnologies.com/grant-gni/*` URLs. Version bumped to `1.3.1.0`.
+- ⚠️ The support/privacy/help links are **placeholders** — see section 22.
+
+---
+
+## 22. Domain-name migration checklist
+
+When you buy your own domain (e.g. `zaviontechnologies.com`) and stop using the default
+Cloud Run URL and the placeholder links, update **every** place below. Search the repo
+for the old values to be sure none are missed.
+
+**Search-and-replace the placeholders** (currently `zaviontechnologies.com`, the Cloud Run
+URL, and any remaining `reference.legal`):
+
+| # | What to change | File(s) | Current value → New value |
+|---|---|---|---|
+| 1 | **Backend base URL** the add-in calls | `src/taskpane/taskpane.js` (`DEFAULT_BACKEND_URL`), `src/taskpane/modules/advisor/advisor-panel.js` (`resolveBackendUrl`) | `https://grant-gni-backend-…run.app` → `https://api.yourdomain.com` |
+| 2 | **Backend domain allow-list** for Office | `manifest.xml` `<AppDomains>` | add `https://api.yourdomain.com` |
+| 3 | **Support URL** (Office "Get support") | `manifest.xml` `<SupportUrl>` | `https://www.zaviontechnologies.com/grant-gni/support` → your real form |
+| 4 | **Support / Privacy / Help links** in the UI | `src/taskpane/taskpane.js` (`SUPPORT_URL`, `PRIVACY_URL`, `HELP_URL`, and the about-popup link) | replace all three placeholders with real pages |
+| 5 | **CORS allow-list** on the backend | Cloud Run env `ALLOWED_ORIGINS` | set to your add-in origin(s) instead of `*` for production |
+| 6 | **Add-in source URLs** (if you host the task pane on your domain instead of localhost) | `manifest.xml` `<SourceLocation>`, `IconUrl`, `bt:Url` entries | `https://localhost:3000/...` → `https://addin.yourdomain.com/...` |
+| 7 | **Manifest version** | `manifest.xml` `<Version>` | bump (e.g. `1.3.1.0 → 1.4.0.0`) so Office picks up the new manifest |
+
+**DNS / hosting steps** (details in the
+[Complete Deployment Guide](./Grant%20Gni%20-%20Complete%20Deployment%20Guide.docx)):
+
+1. Point the domain's DNS at your host (Cloud Run domain mapping for the API; static host
+   or Cloud Run for the task pane).
+2. Map a **custom domain to the Cloud Run backend service** (`gcloud run domain-mappings
+   create …`) and wait for the managed TLS certificate to provision.
+3. Re-deploy the backend (push to `main`) and **re-sideload / re-publish** the updated
+   `manifest.xml`.
+4. If you list on the Microsoft Marketplace, the support URL and privacy policy URL must
+   resolve to **real, working pages** before submission (section 16).
+
+**Reminder — embeddings are unaffected by the domain change.** Moving domains does not
+touch the vector store. You only need to re-ingest if you change `EMBED_MODEL`/`EMBED_DIM`
+(section 21), not when you change the domain.
 
 ---
 

@@ -20,8 +20,8 @@
   <!-- Review panel styles -->
   <style>
     #advisor-open {
-      right: 92px; width: auto; padding: 0 10px; font-size: 12px; font-weight: 600;
-      border-radius: 12px;
+      right: 92px; width: auto; min-height: 34px; padding: 7px 16px; font-size: 13px;
+      font-weight: 600; line-height: 1.1; border-radius: 17px;
     }
     .review-kb { margin-top: 22px; padding-top: 14px; border-top: 1px solid #e1dfdd; }
     .review-kb h4 { margin: 0 0 6px; }
@@ -92,9 +92,9 @@
 
       <div id="glance-container" class="ms-Grid-col ms-sm12">
         <div class="section-header">
-          <h3>Glance</h3>
+          <h3>Checklist</h3>
           <div class="glance-actions">
-            <button id="refresh-glance-button" title="Refresh Checks">
+            <button id="refresh-glance-button" title="Re-run checklist">
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
                 stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M23 4v6h-6"></path>
@@ -102,7 +102,7 @@
                 <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
               </svg>
             </button>
-            <button id="toggle-glance-button" title="Hide Glance results" aria-expanded="true"
+            <button id="toggle-glance-button" title="Hide checklist results" aria-expanded="true"
               aria-controls="glance-content">
               <span class="glance-toggle-arrow">&#9662;</span>
             </button>
@@ -133,6 +133,7 @@
       placeholder="Enter system instructions."></textarea>
     <br />
     <label for="model-select-fast">Fast Model:</label>
+    <p class="settings-hint" style="margin: 2px 0 6px;">Used for everyday chat and quick edits (the Send button). Fast and low-cost.</p>
     <select id="model-select-fast" class="ms-TextField-field">
       <option value="gemini-flash-lite-latest">Gemini 2.5 Flash Lite</option>
       <option value="gemini-2.5-flash" selected>Gemini 2.5 Flash</option>
@@ -142,6 +143,7 @@
     </select>
     <br />
     <label for="model-select-slow">Slow Model:</label>
+    <p class="settings-hint" style="margin: 2px 0 6px;">Used when you press “Think” — deeper analysis and reasoning. Slower but more thorough. If a model is overloaded, the app automatically falls back to another.</p>
     <select id="model-select-slow" class="ms-TextField-field">
       <option value="gemini-flash-lite-latest">Gemini 2.5 Flash Lite</option>
       <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
@@ -152,9 +154,9 @@
     <br />
     <br />
 
-    <!-- Glance Settings Accordion -->
+    <!-- Checklist Settings Accordion -->
     <div class="accordion-header" id="glance-settings-header">
-      <h3>Glance Settings</h3>
+      <h3>Checklist Settings</h3>
       <span class="accordion-icon">&#9654;</span>
     </div>
     <div id="glance-settings-content" class="accordion-content" style="display: none;">

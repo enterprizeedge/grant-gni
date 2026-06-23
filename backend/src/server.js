@@ -23,6 +23,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 
 import { createGeminiProvider } from "./providers/gemini.js";
+import { generateWithFallback } from "./providers/resilience.js";
 import { retrieve, storeStatus, invalidateStore } from "./knowledge/retriever.js";
 import { advise } from "./knowledge/advisor.js";
 import { ingestTenantText } from "./knowledge/ingest.js";
@@ -33,10 +34,15 @@ dotenv.config();
 
 const PORT = Number(process.env.PORT) || 3001;
 const USE_HTTPS = String(process.env.USE_HTTPS || "true").toLowerCase() === "true";
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "https://localhost:3000")
+// CORS origins. Use "*" (default) to reflect any origin — safe here because the
+// add-in sends no cookies/credentials, and an Office task pane's origin can vary
+// (https://localhost:3000 in dev, the WebView host in production). Set a specific
+// comma-separated allow-list via ALLOWED_ORIGINS once the production origin is fixed.
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "*")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
+const ALLOW_ALL_ORIGINS = ALLOWED_ORIGINS.includes("*");
 
 // ── Provider selection (gemini now; vertex slots in here later) ──────────────
 function buildProvider() {
@@ -54,16 +60,22 @@ const provider = buildProvider();
 
 const app = express();
 app.use(express.json({ limit: "25mb" })); // documents (base64) can be large
-app.use(
-  cors({
-    origin(origin, cb) {
-      if (!origin) return cb(null, true); // same-origin / non-browser tools
-      if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-      return cb(new Error(`Origin not allowed by CORS: ${origin}`));
-    },
-    methods: ["GET", "POST", "DELETE", "OPTIONS"],
-  })
-);
+// IMPORTANT: never throw from the origin callback. Throwing makes the CORS
+// preflight (OPTIONS) fail with a 500 and no CORS headers, which the browser
+// reports to the add-in as the opaque "Failed to fetch". Instead we reflect the
+// allowed origin (or all origins) and simply omit the header for disallowed ones.
+const corsOptions = {
+  origin(origin, cb) {
+    if (!origin) return cb(null, true); // same-origin / non-browser tools
+    if (ALLOW_ALL_ORIGINS) return cb(null, true); // reflect any origin
+    return cb(null, ALLOWED_ORIGINS.includes(origin)); // never throw
+  },
+  methods: ["GET", "POST", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  maxAge: 86400,
+};
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions)); // answer all preflights explicitly
 
 app.get("/health", (_req, res) => {
   let knowledge = null;
@@ -92,7 +104,15 @@ app.post("/api/generate", async (req, res) => {
     });
   }
   try {
-    const { status, body } = await provider.generateContent(String(model), req.body);
+    // Retry + automatic model fallback on 503/"high demand" and transient errors.
+    const { status, body, modelUsed } = await generateWithFallback({
+      provider,
+      model: String(model),
+      payload: req.body,
+    });
+    if (modelUsed && modelUsed !== String(model)) {
+      res.setHeader("X-Model-Used", modelUsed); // visibility into fallbacks
+    }
     res.status(status).type("application/json").send(body);
   } catch (err) {
     console.error("[/api/generate] proxy error:", err);

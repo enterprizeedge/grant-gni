@@ -5,6 +5,7 @@
 
 import { retrieve } from "./retriever.js";
 import { selectSkillsForReview } from "./skills.js";
+import { generateWithFallback } from "../providers/resilience.js";
 
 const ADVISOR_MODEL = process.env.ADVISOR_MODEL || "gemini-flash-latest";
 
@@ -22,11 +23,21 @@ function extractJson(text) {
 }
 
 export async function gatherGrounding({ program, section, callId, tenantId }) {
-  const winning = await retrieve(`exemplar ${section || ""} content for a strong proposal`, {
+  let winning = await retrieve(`exemplar ${section || ""} content for a strong proposal`, {
     topK: 3,
     tenantId,
     filter: { program: program || null, docType: "winning-proposal", section: section || null },
   }).catch(() => []);
+  // If the section filter found no exemplars (common when uploaded docs aren't
+  // section-tagged), fall back to broad retrieval so a chosen section is never
+  // *worse* than "auto / any".
+  if (section && winning.length === 0) {
+    winning = await retrieve(`exemplar content for a strong proposal`, {
+      topK: 3,
+      tenantId,
+      filter: { program: program || null, docType: "winning-proposal", section: null },
+    }).catch(() => []);
+  }
   const template = await retrieve(`${section || ""} evaluation criteria and required elements`, {
     topK: 2,
     tenantId,
@@ -80,8 +91,21 @@ export async function advise({ provider, sectionText, program, section, callId, 
     contents: [{ parts: [{ text: prompt }] }],
     generationConfig: { temperature: 0.3, responseMimeType: "application/json" },
   };
-  const { status, body } = await provider.generateContent(ADVISOR_MODEL, payload);
+  // Retry + automatic model fallback so a transient 503 ("high demand") does not
+  // surface to the client as a failed Review.
+  const { status, body, modelUsed, attempts } = await generateWithFallback({
+    provider,
+    model: ADVISOR_MODEL,
+    payload,
+  });
   if (status < 200 || status >= 300) {
+    // Log the real upstream detail server-side (visible in Cloud Run logs) so
+    // demand spikes vs. genuine errors can be told apart; client sees a friendly msg.
+    console.error(
+      `[advise] upstream failed after ${attempts} attempt(s); last model=${modelUsed} status=${status} body=${String(
+        body
+      ).slice(0, 500)}`
+    );
     throw new Error(`LLM error (${status}): ${body}`);
   }
   let suggestions = [];

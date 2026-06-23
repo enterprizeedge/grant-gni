@@ -41,7 +41,7 @@ export async function ingestGlobal({ knowledgeDir = KNOWLEDGE_DIR, storePath = G
     const fileId = path.relative(knowledgeDir, file).replace(/\\/g, "/");
     for (const c of chunkDocument(raw, fileId)) allChunks.push(c);
   }
-  const vectors = await provider.embed(allChunks.map((c) => c.text));
+  const vectors = await provider.embed(allChunks.map((c) => c.text), { taskType: "RETRIEVAL_DOCUMENT" });
   const records = allChunks.map((c, i) => ({
     id: `${c.metadata.fileId}#${c.metadata.chunkIndex}`,
     vector: vectors[i],
@@ -49,7 +49,7 @@ export async function ingestGlobal({ knowledgeDir = KNOWLEDGE_DIR, storePath = G
     metadata: c.metadata,
   }));
   const store = new FileVectorStore(storePath);
-  store.reset({ embedProvider: provider.name, dim: provider.dim });
+  store.reset({ embedProvider: provider.name, embedModel: provider.model, dim: provider.dim });
   store.upsert(records);
   store.save();
   invalidateStore(storePath);
@@ -76,7 +76,7 @@ export async function ingestTenantText(tenantId, { filename, text, program, docT
       source: filename || fileId,
     },
   }));
-  const vectors = await provider.embed(chunks.map((c) => c.text));
+  const vectors = await provider.embed(chunks.map((c) => c.text), { taskType: "RETRIEVAL_DOCUMENT" });
   const records = chunks.map((c, i) => ({
     id: `${id}:${fileId}#${c.metadata.chunkIndex}`,
     vector: vectors[i],
@@ -86,7 +86,21 @@ export async function ingestTenantText(tenantId, { filename, text, program, docT
 
   const storePath = tenantStorePath(id);
   const store = new FileVectorStore(storePath).load();
-  if (!store.meta.embedProvider) store.reset({ embedProvider: provider.name, dim: provider.dim });
+  // Invariant: every vector in a store must come from the same embedding model/dim.
+  // If the embedding model changed since this tenant store was built, rebuild it
+  // (old vectors are incompatible) rather than mixing dimensionalities.
+  const modelChanged =
+    store.meta.embedProvider &&
+    (store.meta.embedModel !== provider.model || store.meta.dim !== provider.dim);
+  if (!store.meta.embedProvider || modelChanged) {
+    if (modelChanged) {
+      console.warn(
+        `[ingest] tenant "${id}" embedding model changed ` +
+          `(${store.meta.embedModel}/${store.meta.dim} -> ${provider.model}/${provider.dim}); rebuilding store.`
+      );
+    }
+    store.reset({ embedProvider: provider.name, embedModel: provider.model, dim: provider.dim });
+  }
   store.upsert(records);
   store.save();
   invalidateStore(storePath);

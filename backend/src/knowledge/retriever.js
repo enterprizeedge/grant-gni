@@ -26,9 +26,17 @@ export function invalidateStore(path) {
 
 export function storeStatus(tenantId) {
   const global = getStore(GLOBAL_STORE_PATH);
+  const qp = getProvider();
   const status = {
-    queryProvider: getProvider().name,
-    global: { size: global.size(), embedProvider: global.meta.embedProvider, dim: global.meta.dim },
+    queryProvider: qp.name,
+    queryModel: qp.model,
+    queryDim: qp.dim,
+    global: {
+      size: global.size(),
+      embedProvider: global.meta.embedProvider,
+      embedModel: global.meta.embedModel,
+      dim: global.meta.dim,
+    },
   };
   if (tenantId) {
     const t = getStore(tenantStorePath(sanitizeTenantId(tenantId)));
@@ -38,19 +46,42 @@ export function storeStatus(tenantId) {
   return status;
 }
 
+// Guard: a store is only searchable if its vectors were built with the same
+// embedding model/dim as the current query embedding. This is what keeps the
+// embedding layer independent and safe: if the embedding model is changed without
+// re-ingesting, we skip the stale store (with a warning) instead of returning
+// nonsense scores from mismatched dimensionalities.
+function searchable(store, provider) {
+  if (store.size() === 0) return false;
+  const storeDim = store.meta && store.meta.dim;
+  if (storeDim && provider.dim && storeDim !== provider.dim) {
+    console.warn(
+      `[retrieve] skipping store ${store.filePath}: built with ` +
+        `${store.meta.embedModel || store.meta.embedProvider}/${storeDim}, ` +
+        `query uses ${provider.model}/${provider.dim}. Re-run ingestion to use the new model.`
+    );
+    return false;
+  }
+  return true;
+}
+
 // retrieve(query, { topK, filter, tenantId })
 export async function retrieve(query, opts = {}) {
   const { topK = 5, filter = null, tenantId = null } = opts;
   const provider = getProvider();
-  const [vector] = await provider.embed([query]);
+  const [vector] = await provider.embed([query], { taskType: "RETRIEVAL_QUERY" });
 
   const collected = [];
   const global = getStore(GLOBAL_STORE_PATH);
-  for (const h of global.query(vector, { topK, filter })) collected.push({ ...h, origin: "global" });
+  if (searchable(global, provider)) {
+    for (const h of global.query(vector, { topK, filter })) collected.push({ ...h, origin: "global" });
+  }
 
   if (tenantId) {
     const tenant = getStore(tenantStorePath(sanitizeTenantId(tenantId)));
-    for (const h of tenant.query(vector, { topK, filter })) collected.push({ ...h, origin: "private" });
+    if (searchable(tenant, provider)) {
+      for (const h of tenant.query(vector, { topK, filter })) collected.push({ ...h, origin: "private" });
+    }
   }
 
   if (collected.length === 0 && global.size() === 0) {

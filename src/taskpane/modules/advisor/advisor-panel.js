@@ -30,14 +30,31 @@ function showReviewView() {
   const view = el("advisor-view");
   if (main) main.style.display = "none";
   if (settings) settings.style.display = "none";
-  if (view) view.style.display = "block";
+  if (view) {
+    // Clear any leftover transition class so the panel is fully opaque/clickable.
+    view.classList.remove("view-hidden");
+    view.classList.add("view-container");
+    view.style.display = "block";
+  }
   refreshKbStatus();
 }
 function hideReviewView() {
   const view = el("advisor-view");
   const main = el("main-view");
   if (view) view.style.display = "none";
-  if (main) main.style.display = "block";
+  if (main) {
+    main.style.display = "block";
+    // CRITICAL: the main view may still carry the `view-hidden` class (opacity:0,
+    // pointer-events:none) from an earlier view transition. Without removing it,
+    // chat + checklist render invisibly and the pane looks blank after "Back".
+    main.classList.remove("view-hidden");
+    main.classList.add("view-container");
+  }
+  // Restore the floating top controls hidden when entering Settings/Review.
+  const settingsBtn = el("settings-button");
+  const refreshBtn = el("refresh-chat-button");
+  if (settingsBtn) settingsBtn.style.display = "block";
+  if (refreshBtn) refreshBtn.style.display = "block";
 }
 
 function escapeHtml(s) {
@@ -220,15 +237,23 @@ async function runReview() {
         tenantId: getTenantId(),
       }),
     });
-    const d = await res.json();
+    const d = await res.json().catch(() => ({}));
     if (!res.ok) {
-      if (status) status.textContent = `Review error (${res.status}): ${d.error ? d.error.message : ""}`;
+      // Keep client-facing wording friendly; never leak raw provider 5xx text.
+      if (status) {
+        status.textContent =
+          res.status >= 500
+            ? "The review service is busy right now. Please try again in a moment."
+            : `We couldn't complete the review${d.error && d.error.message ? ": " + d.error.message : "."}`;
+      }
       return;
     }
     if (status) status.textContent = "";
     openModal(d);
   } catch (err) {
-    if (status) status.textContent = `Could not reach the Review service. Is the backend running? (${err.message})`;
+    if (status)
+      status.textContent =
+        "Couldn't reach the review service. Please check your connection and try again.";
   } finally {
     if (runBtn) runBtn.disabled = false;
   }

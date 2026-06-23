@@ -74,7 +74,11 @@ const SEARCH_LIMITS = {
 
 // Document processing limits
 const DOCUMENT_LIMITS = {
-  MAX_WORDS: 30000,          // Approx 40 pages, ~40k tokens
+  // Gemini 2.5 Flash/Pro have ~1M-token context windows, so a full proposal of a
+  // few hundred pages fits comfortably. This ceiling only guards against truly
+  // pathological inputs that would exhaust the window (leaving room for the
+  // response + tool round-trips). ~450k words ≈ ~600k tokens.
+  MAX_WORDS: 450000,         // was 30000; raised so whole-proposal edits work
   MAX_LOOPS: 6,              // Maximum tool execution loops
   MAX_NO_PROGRESS_TOOL_LOOPS: 2, // Stop when the same mutation tool cycle keeps applying 0 changes
   TOKEN_MULTIPLIER: 1.33     // Words to tokens conversion factor
@@ -296,6 +300,10 @@ Office.onReady((info) => {
     // Initialize the Advisor panel (grounded suggestions via backend /api/advise)
     initAdvisorPanel({ resolveBackendUrl: getBackendBaseUrl });
 
+    // Replace the dev WebView right-click menu (Reload / Attach Debugger /
+    // Security Info) with an end-user-friendly menu.
+    setupCustomContextMenu();
+
     // Add event listener for refresh chat button
     document.getElementById("refresh-chat-button").onclick = refreshChat;
 
@@ -411,7 +419,7 @@ function showWelcomeScreen() {
     </div>
 
     <div class="feature-explanation">
-      <h3>Glance Checks</h3>
+      <h3>Checklist</h3>
       <p>Set up custom criteria (like <em>Grammar</em> or <em>Factual Accuracy</em>) to automatically check every document you open.  You can customize these questions in Settings.</p>
     </div>
 
@@ -427,7 +435,7 @@ function showWelcomeScreen() {
     </div>
 
     <div class="welcome-footer">
-      <p><em>If you have any questions, please reach out to us at <a href="mailto:support@reference.legal">support@reference.legal</a>.</em></p>
+      <p><em>If you have any questions, please <a href="https://www.zaviontechnologies.com/grant-gni/support" target="_blank" rel="noopener">contact our support team</a>.</em></p>
     </div>
   `;
 
@@ -571,6 +579,66 @@ function saveApiKey() {
 // for staging/production by setting localStorage "grantGniBackendUrl".
 //const DEFAULT_BACKEND_URL = "https://localhost:3001";
 const DEFAULT_BACKEND_URL = "https://grant-gni-backend-418969920062.europe-west1.run.app";
+
+// End-user support / legal links. TODO(SAM): replace with the real URLs on your site.
+const SUPPORT_URL = "https://www.zaviontechnologies.com/grant-gni/support";
+const PRIVACY_URL = "https://www.zaviontechnologies.com/grant-gni/privacy";
+const HELP_URL = "https://www.zaviontechnologies.com/grant-gni/help";
+
+// Custom right-click menu — shown instead of the WebView's developer context menu
+// (Reload / Attach Debugger / Security Info), which is meaningless to end users.
+function setupCustomContextMenu() {
+  let menu = null;
+  const closeMenu = () => {
+    if (menu) { menu.remove(); menu = null; }
+  };
+  const openExternal = (url) => {
+    try {
+      if (typeof Office !== "undefined" && Office.context && Office.context.ui &&
+          Office.context.ui.openBrowserWindow) {
+        Office.context.ui.openBrowserWindow(url);
+      } else {
+        window.open(url, "_blank", "noopener");
+      }
+    } catch {
+      window.open(url, "_blank", "noopener");
+    }
+  };
+  const items = [
+    { label: "Help &amp; Guide", action: () => openExternal(HELP_URL) },
+    { label: "Privacy Policy", action: () => openExternal(PRIVACY_URL) },
+    { label: "Get Support", action: () => openExternal(SUPPORT_URL) },
+    { label: "Reload", action: () => window.location.reload() },
+  ];
+
+  document.addEventListener("contextmenu", (e) => {
+    e.preventDefault(); // suppress the default WebView dev menu
+    closeMenu();
+    menu = document.createElement("div");
+    menu.className = "custom-context-menu";
+    items.forEach((it) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "custom-context-menu-item";
+      btn.innerHTML = it.label;
+      btn.onclick = () => { closeMenu(); it.action(); };
+      menu.appendChild(btn);
+    });
+    document.body.appendChild(menu);
+    // Keep the menu inside the viewport.
+    const mw = menu.offsetWidth || 180;
+    const mh = menu.offsetHeight || 160;
+    const x = Math.min(e.clientX, window.innerWidth - mw - 8);
+    const y = Math.min(e.clientY, window.innerHeight - mh - 8);
+    menu.style.left = Math.max(4, x) + "px";
+    menu.style.top = Math.max(4, y) + "px";
+  });
+
+  document.addEventListener("click", closeMenu);
+  document.addEventListener("scroll", closeMenu, true);
+  window.addEventListener("blur", closeMenu);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(); });
+}
 
 function getBackendBaseUrl() {
   const override = localStorage.getItem("grantGniBackendUrl");
@@ -743,7 +811,7 @@ function applyGlanceCollapsedState(isCollapsed = loadGlanceCollapsedState()) {
 
   container.classList.toggle("collapsed", isCollapsed);
   toggleButton.setAttribute("aria-expanded", (!isCollapsed).toString());
-  toggleButton.setAttribute("title", isCollapsed ? "Show Glance results" : "Hide Glance results");
+  toggleButton.setAttribute("title", isCollapsed ? "Show checklist results" : "Hide checklist results");
 }
 
 function setupAccordion(headerId, contentId) {
