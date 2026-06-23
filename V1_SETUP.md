@@ -90,7 +90,7 @@ npm start
 ```
 
 This builds the add-in, serves it on `https://localhost:3000`, and opens Word with
-**Grant Gni** sideloaded.
+**Grant Gni** sideloaded. This address is now changed to GCP address
 
 ## Step 4 — Confirm it works
 
