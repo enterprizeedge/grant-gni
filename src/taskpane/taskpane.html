@@ -17,25 +17,38 @@
   <!-- Your Add-in's CSS -->
   <link rel="stylesheet" href="taskpane.css" type="text/css" />
 
-  <!-- Advisor panel styles -->
+  <!-- Review panel styles -->
   <style>
-    #advisor-open { right: 84px; }
-    .advisor-card {
-      border: 1px solid #e1dfdd;
-      border-left: 3px solid var(--primary-color, #0078d4);
-      border-radius: 6px;
-      padding: 10px 12px;
-      margin-bottom: 10px;
-      background: #faf9f8;
+    #advisor-open {
+      right: 92px; width: auto; padding: 0 10px; font-size: 12px; font-weight: 600;
+      border-radius: 12px;
     }
-    .advisor-issue { font-weight: 600; margin-bottom: 4px; }
-    .advisor-suggestion { margin-bottom: 6px; }
-    .advisor-rationale { font-size: 12px; opacity: 0.85; }
-    .advisor-basedon { font-size: 11px; opacity: 0.6; margin-top: 6px; }
-    .advisor-sources { margin-top: 10px; font-size: 12px; }
-    .advisor-sources summary { cursor: pointer; opacity: 0.8; }
-    .advisor-loading, .advisor-empty, .advisor-error { font-size: 13px; opacity: 0.9; }
-    .advisor-error { color: #a4262c; }
+    .review-kb { margin-top: 22px; padding-top: 14px; border-top: 1px solid #e1dfdd; }
+    .review-kb h4 { margin: 0 0 6px; }
+    .review-card {
+      border: 1px solid #e1dfdd; border-left: 3px solid var(--primary-color, #0078d4);
+      border-radius: 6px; padding: 12px 14px; margin-bottom: 12px; background: #faf9f8;
+    }
+    .review-issue { font-weight: 600; margin-bottom: 6px; }
+    .review-suggestion { margin-bottom: 8px; }
+    .review-rationale { font-size: 13px; opacity: 0.85; }
+
+    /* Popup */
+    .review-modal {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.45);
+      display: flex; align-items: center; justify-content: center; z-index: 1000;
+    }
+    .review-modal-card {
+      background: #fff; width: 94%; height: 90%; max-width: 900px;
+      border-radius: 8px; display: flex; flex-direction: column; overflow: hidden;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+    }
+    .review-modal-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 16px; border-bottom: 1px solid #e1dfdd; flex: 0 0 auto;
+    }
+    .review-modal-header .ms-Button { margin-left: 8px; }
+    .review-modal-body { padding: 16px; overflow-y: auto; flex: 1 1 auto; }
   </style>
 </head>
 
@@ -44,8 +57,8 @@
   <!-- Refresh Button -->
   <button id="refresh-chat-button" title="Clear chat and start new">&#8635;</button> <!-- Refresh icon -->
 
-  <!-- Advisor Button -->
-  <button id="advisor-open" title="Advisor — review against winning proposals">&#9733;</button> <!-- Star icon -->
+  <!-- Review Button -->
+  <button id="advisor-open" title="Review your proposal against winning proposals">Review</button>
 
   <!-- Settings Icon -->
   <button id="settings-button" title="Settings">&#9881;</button> <!-- Gear icon -->
@@ -196,18 +209,21 @@
     <button id="back-to-main" class="ms-Button">Back</button>
   </div>
 
-  <!-- Advisor View (Hidden by default) -->
+  <!-- Review View (Hidden by default) -->
   <div id="advisor-view" class="view-container" style="display: none;">
-    <h3>Advisor</h3>
+    <h3>Review</h3>
     <p class="settings-hint">Review your selected section against winning proposals, the
       program template, and the call's strategic intent. Select text first, or the whole
       document is reviewed.</p>
+
+    <label for="advisor-client">Client ID:</label>
+    <input type="text" id="advisor-client" class="ms-TextField-field" placeholder="your-organisation">
 
     <label for="advisor-program">Funding program:</label>
     <select id="advisor-program" class="ms-TextField-field">
       <option value="horizon-europe" selected>Horizon Europe</option>
     </select>
-    <br />
+
     <label for="advisor-section">Section:</label>
     <select id="advisor-section" class="ms-TextField-field">
       <option value="">(auto / any)</option>
@@ -215,16 +231,46 @@
       <option value="impact">Impact</option>
       <option value="implementation">Implementation</option>
     </select>
-    <br />
+
     <label for="advisor-call">Call ID (optional):</label>
     <input type="text" id="advisor-call" class="ms-TextField-field"
       placeholder="e.g. HORIZON-CL5-2026-D3-01-SYNTH">
-    <br /><br />
 
-    <button id="advisor-run" class="ms-Button ms-Button--primary">Get advice</button>
+    <br />
+    <button id="advisor-run" class="ms-Button ms-Button--primary">Review</button>
     <button id="advisor-back" class="ms-Button">Back</button>
+    <div id="advisor-run-status" class="settings-hint" style="margin-top:8px;"></div>
 
-    <div id="advisor-results" style="margin-top: 16px;"></div>
+    <!-- Private knowledge base (upload-only, isolated per client) -->
+    <div class="review-kb">
+      <h4>Your knowledge base</h4>
+      <p class="settings-hint">Upload your own winning proposals or templates. They are
+        stored privately for your Client ID and never shared with other clients.
+        Supported: .docx, .txt, .md.</p>
+      <label for="advisor-doctype">Document type:</label>
+      <select id="advisor-doctype" class="ms-TextField-field">
+        <option value="winning-proposal" selected>Winning proposal</option>
+        <option value="template">Template</option>
+        <option value="call">Call text</option>
+      </select>
+      <input type="file" id="advisor-file" accept=".docx,.txt,.md" class="ms-TextField-field">
+      <button id="advisor-upload" class="ms-Button">Add to my knowledge base</button>
+      <div id="advisor-kb-status" class="settings-hint" style="margin-top:8px;"></div>
+    </div>
+  </div>
+
+  <!-- Review results popup -->
+  <div id="advisor-modal" class="review-modal" style="display:none;">
+    <div class="review-modal-card">
+      <div class="review-modal-header">
+        <strong>Review suggestions</strong>
+        <div>
+          <button id="advisor-modal-copy" class="ms-Button">Copy</button>
+          <button id="advisor-modal-close" class="ms-Button">Close</button>
+        </div>
+      </div>
+      <div id="advisor-modal-body" class="review-modal-body"></div>
+    </div>
   </div>
 
   <div id="sideload-msg" style="display:none">

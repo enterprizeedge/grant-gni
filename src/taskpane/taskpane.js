@@ -569,7 +569,8 @@ function saveApiKey() {
 // The add-in no longer calls Google directly. All LLM traffic goes through the
 // Grant Gni backend, which holds the provider key server-side. Override the URL
 // for staging/production by setting localStorage "grantGniBackendUrl".
-const DEFAULT_BACKEND_URL = "https://localhost:3001";
+//const DEFAULT_BACKEND_URL = "https://localhost:3001";
+const DEFAULT_BACKEND_URL = "https://grant-gni-backend-418969920062.europe-west1.run.app";
 
 function getBackendBaseUrl() {
   const override = localStorage.getItem("grantGniBackendUrl");

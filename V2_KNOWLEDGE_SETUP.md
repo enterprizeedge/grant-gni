@@ -98,5 +98,48 @@ deploy, and prefer redacted versions where possible.
 - **Needs you:** a `GEMINI_API_KEY` to run real embeddings + advice, and sideloading
   in Word to try the Advisor panel. Real proposal/template content when you're ready.
 
+## Update — three-tier knowledge + per-client private KB + Review UI
+
+The knowledge layer is now multi-tenant, with three isolated layers:
+
+1. **Global (shared):** program template + call context, in `backend/knowledge/` →
+   `data/global/vector-store.json` (built by `npm run ingest`).
+2. **Skills (shared methodology):** `backend/skills/{expert_review,drafting,finance,
+   project_reporting}_skill.md` — reusable "how to review" expertise injected into the
+   prompt. **Contains no client data.**
+3. **Per-client private (isolated):** each client uploads their own proposals/templates;
+   stored under `data/tenants/<clientId>/` and **never visible to other clients**.
+
+At review time, retrieval merges the client's private data (prioritised) with the
+global layer, and the selected skills shape the critique.
+
+### Private KB endpoints (upload-only, no connectors)
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/tenant/:id/documents` | Upload + index one file (`.docx/.txt/.md`, base64 or text). |
+| `GET /api/tenant/:id/status` | That client's KB size + uploaded file list. |
+| `DELETE /api/tenant/:id/documents` | Wipe that client's KB (GDPR delete path). |
+
+`tenantId` (Client ID) is validated and isolated. Until sign-in exists it is supplied
+by the add-in; the auth stage will bind it to an authenticated organisation so it
+cannot be spoofed.
+
+### Using it in Word
+
+The panel is now **Review** (button top-right). Set your **Client ID**, optionally
+upload documents to *your* knowledge base, select a section (or none), and click
+**Review**. Suggestions open in a **popup** with a **Copy** button (paste into the
+document or a Teams message). Source groundedness is no longer shown.
+
+### Verified (direct module tests, local embeddings)
+
+- `.docx` text extraction against `tests/Sample NDA.docx` (5,895 chars).
+- **Isolation:** client A cannot retrieve client B's data and vice-versa.
+- **Merged retrieval** returns both private and global hits.
+- **Skills** are selected and injected; advise returns suggestions + grounding counts.
+- GDPR delete uses `fs.rmSync` (couldn't be exercised in the sandbox mount, which
+  blocks unlink, but is correct on a real filesystem / Cloud Run).
+
 ## Next stages (unchanged order)
 3. Excel budget/resource add-in · 4. MLflow / usage analytics · 5. Auth + subscriptions.

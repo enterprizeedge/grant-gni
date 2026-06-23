@@ -1,37 +1,115 @@
-/* global Word, document, fetch */
+/* global Word, document, fetch, FileReader, navigator */
 
-// Grant Gni — Advisor panel.
-// A dedicated view that reviews the current section of the proposal against
-// retrieved winning-proposal exemplars, the program template criteria, and the
-// active call's strategic context (backend /api/advise). Self-contained: it only
-// needs a way to resolve the backend base URL.
+// Grant Gni — Review panel.
+// Reviews the current section of the proposal against the client's own uploaded
+// proposals (private KB), the shared program template/call context, and the shared
+// review skills. Results open in a popup with a Copy button. Also lets the client
+// upload documents into their own isolated knowledge base (upload-only, no connectors).
 
-let resolveBackendUrl = () => "https://localhost:3001";
+//let resolveBackendUrl = () => "https://localhost:3001";
+let resolveBackendUrl = () => "https://grant-gni-backend-418969920062.europe-west1.run.app";
+const el = (id) => document.getElementById(id);
 
-function el(id) {
-  return document.getElementById(id);
+function backendBase() {
+  return resolveBackendUrl().replace(/\/+$/, "");
 }
 
-function showAdvisorView() {
+// --- tenant (client) identity -------------------------------------------------
+// Until sign-in exists, the client id is stored locally. Auth will later bind this
+// to the authenticated organisation so it cannot be spoofed.
+function getTenantId() {
+  return (localStorage.getItem("grantGniTenantId") || "demo").trim() || "demo";
+}
+function setTenantId(v) {
+  if (v && v.trim()) localStorage.setItem("grantGniTenantId", v.trim());
+}
+
+function showReviewView() {
   const main = el("main-view");
   const settings = el("settings-view");
-  const advisor = el("advisor-view");
+  const view = el("advisor-view");
   if (main) main.style.display = "none";
   if (settings) settings.style.display = "none";
-  if (advisor) advisor.style.display = "block";
+  if (view) view.style.display = "block";
+  refreshKbStatus();
 }
-
-function hideAdvisorView() {
-  const advisor = el("advisor-view");
+function hideReviewView() {
+  const view = el("advisor-view");
   const main = el("main-view");
-  if (advisor) advisor.style.display = "none";
+  if (view) view.style.display = "none";
   if (main) main.style.display = "block";
 }
 
-// Reads the user's current selection; falls back to the whole document body.
+function escapeHtml(s) {
+  return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// --- private knowledge base ---------------------------------------------------
+async function refreshKbStatus() {
+  const status = el("advisor-kb-status");
+  if (!status) return;
+  try {
+    const res = await fetch(`${backendBase()}/api/tenant/${encodeURIComponent(getTenantId())}/status`);
+    if (!res.ok) {
+      status.textContent = "";
+      return;
+    }
+    const d = await res.json();
+    const size = d.tenant ? d.tenant.size : 0;
+    const files = (d.uploads || []).length;
+    status.textContent = `Your knowledge base: ${files} document(s), ${size} indexed passage(s).`;
+  } catch {
+    status.textContent = "";
+  }
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(fr.result);
+    fr.onerror = () => reject(new Error("Could not read file"));
+    fr.readAsDataURL(file);
+  });
+}
+
+async function uploadDocument() {
+  const input = el("advisor-file");
+  const status = el("advisor-kb-status");
+  const btn = el("advisor-upload");
+  if (!input || !input.files || input.files.length === 0) {
+    if (status) status.textContent = "Choose a .docx, .txt or .md file first.";
+    return;
+  }
+  const file = input.files[0];
+  const program = el("advisor-program") ? el("advisor-program").value : "horizon-europe";
+  const docType = el("advisor-doctype") ? el("advisor-doctype").value : "winning-proposal";
+  const section = el("advisor-section") ? el("advisor-section").value : "";
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = `Uploading and indexing "${file.name}"…`;
+  try {
+    const dataUrl = await readFileAsDataUrl(file);
+    const res = await fetch(`${backendBase()}/api/tenant/${encodeURIComponent(getTenantId())}/documents`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: file.name, contentBase64: dataUrl, program, docType, section: section || null }),
+    });
+    const d = await res.json();
+    if (!res.ok) {
+      if (status) status.textContent = `Upload failed: ${d.error ? d.error.message : res.status}`;
+      return;
+    }
+    input.value = "";
+    await refreshKbStatus();
+  } catch (err) {
+    if (status) status.textContent = `Upload error: ${err.message}`;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// --- review -------------------------------------------------------------------
 async function readCurrentSection() {
   let text = "";
-  let scope = "selection";
   await Word.run(async (context) => {
     const sel = context.document.getSelection();
     sel.load("text");
@@ -43,68 +121,95 @@ async function readCurrentSection() {
       body.load("text");
       await context.sync();
       text = body.text || "";
-      scope = "document";
     }
   });
-  // cap very large inputs for the first slice
   if (text.length > 12000) text = text.slice(0, 12000);
-  return { text, scope };
+  return text;
 }
 
-function escapeHtml(s) {
-  return String(s || "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-function renderResults(result) {
-  const out = el("advisor-results");
-  if (!out) return;
-  const suggestions = Array.isArray(result.suggestions) ? result.suggestions : [];
-  if (suggestions.length === 0) {
-    out.innerHTML = `<p class="advisor-empty">No suggestions returned. Try selecting a specific section, or check that the knowledge base has been ingested.</p>`;
-    return;
+function suggestionsToHtml(suggestions) {
+  if (!suggestions.length) {
+    return `<p>No suggestions returned. Try selecting a specific section.</p>`;
   }
-  const items = suggestions
+  return suggestions
     .map(
-      (s) => `
-      <div class="advisor-card">
-        <div class="advisor-issue">${escapeHtml(s.issue)}</div>
-        <div class="advisor-suggestion">${escapeHtml(s.suggestion)}</div>
-        <div class="advisor-rationale">${escapeHtml(s.rationale)}</div>
-        ${s.basedOn ? `<div class="advisor-basedon">Based on: ${escapeHtml(s.basedOn)}</div>` : ""}
+      (s, i) => `
+      <div class="review-card">
+        <div class="review-issue">${i + 1}. ${escapeHtml(s.issue)}</div>
+        <div class="review-suggestion">${escapeHtml(s.suggestion)}</div>
+        <div class="review-rationale">${escapeHtml(s.rationale)}</div>
       </div>`
     )
     .join("");
-  const sources = (result.sources || [])
-    .map((src) => `${escapeHtml(src.ref)}: ${escapeHtml(src.docType)}${src.section ? "/" + escapeHtml(src.section) : ""} — ${escapeHtml(src.heading)}`)
-    .join("<br>");
-  out.innerHTML =
-    items +
-    (sources
-      ? `<details class="advisor-sources"><summary>Grounded in ${result.sources.length} source(s)</summary><div>${sources}</div></details>`
-      : "");
 }
 
-async function runAdvice() {
+function suggestionsToPlainText(result) {
+  const header = `Grant Gni review${result.section ? " — " + result.section : ""}${
+    result.program ? " (" + result.program + ")" : ""
+  }\n\n`;
+  const body = (result.suggestions || [])
+    .map(
+      (s, i) =>
+        `${i + 1}. ${s.issue}\n   Suggestion: ${s.suggestion}\n   Why it matters: ${s.rationale}`
+    )
+    .join("\n\n");
+  return header + body;
+}
+
+function openModal(result) {
+  const modal = el("advisor-modal");
+  const body = el("advisor-modal-body");
+  if (!modal || !body) return;
+  body.innerHTML = suggestionsToHtml(result.suggestions || []);
+  modal.dataset.plain = suggestionsToPlainText(result);
+  modal.style.display = "flex";
+}
+function closeModal() {
+  const modal = el("advisor-modal");
+  if (modal) modal.style.display = "none";
+}
+
+async function copyResults() {
+  const modal = el("advisor-modal");
+  const btn = el("advisor-modal-copy");
+  const text = modal ? modal.dataset.plain || "" : "";
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+    if (btn) {
+      const old = btn.textContent;
+      btn.textContent = "Copied!";
+      setTimeout(() => (btn.textContent = old), 1500);
+    }
+  } catch {
+    if (btn) btn.textContent = "Copy failed";
+  }
+}
+
+async function runReview() {
   const runBtn = el("advisor-run");
-  const out = el("advisor-results");
+  const status = el("advisor-run-status");
   const program = el("advisor-program") ? el("advisor-program").value : "horizon-europe";
   const section = el("advisor-section") ? el("advisor-section").value : "";
   const callId = el("advisor-call") ? el("advisor-call").value.trim() : "";
 
   if (runBtn) runBtn.disabled = true;
-  if (out) out.innerHTML = `<p class="advisor-loading">Reading your section and consulting winning proposals…</p>`;
-
+  if (status) status.textContent = "Reading your section and consulting winning proposals…";
   try {
-    const { text, scope } = await readCurrentSection();
+    const text = await readCurrentSection();
     if (!text || !text.trim()) {
-      if (out) out.innerHTML = `<p class="advisor-empty">No text found. Type or select some content first.</p>`;
+      if (status) status.textContent = "No text found. Type or select some content first.";
       return;
     }
-    const url = `${resolveBackendUrl().replace(/\/+$/, "")}/api/advise`;
-    const res = await fetch(url, {
+    const res = await fetch(`${backendBase()}/api/advise`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -112,34 +217,38 @@ async function runAdvice() {
         program,
         section: section || null,
         callId: callId || null,
+        tenantId: getTenantId(),
       }),
     });
+    const d = await res.json();
     if (!res.ok) {
-      const errText = await res.text();
-      if (out) out.innerHTML = `<p class="advisor-error">Advisor error (${res.status}). ${escapeHtml(errText)}</p>`;
+      if (status) status.textContent = `Review error (${res.status}): ${d.error ? d.error.message : ""}`;
       return;
     }
-    const result = await res.json();
-    if (scope === "document" && out) {
-      // small note that we reviewed the whole doc
-      result._scopeNote = true;
-    }
-    renderResults(result);
+    if (status) status.textContent = "";
+    openModal(d);
   } catch (err) {
-    if (out) out.innerHTML = `<p class="advisor-error">Could not reach the Advisor. Is the backend running? (${escapeHtml(err.message)})</p>`;
+    if (status) status.textContent = `Could not reach the Review service. Is the backend running? (${err.message})`;
   } finally {
     if (runBtn) runBtn.disabled = false;
   }
 }
 
 export function initAdvisorPanel(config = {}) {
-  if (typeof config.resolveBackendUrl === "function") {
-    resolveBackendUrl = config.resolveBackendUrl;
+  if (typeof config.resolveBackendUrl === "function") resolveBackendUrl = config.resolveBackendUrl;
+
+  const clientInput = el("advisor-client");
+  if (clientInput) {
+    clientInput.value = getTenantId();
+    clientInput.onchange = () => {
+      setTenantId(clientInput.value);
+      refreshKbStatus();
+    };
   }
-  const openBtn = el("advisor-open");
-  const backBtn = el("advisor-back");
-  const runBtn = el("advisor-run");
-  if (openBtn) openBtn.onclick = showAdvisorView;
-  if (backBtn) backBtn.onclick = hideAdvisorView;
-  if (runBtn) runBtn.onclick = runAdvice;
+  if (el("advisor-open")) el("advisor-open").onclick = showReviewView;
+  if (el("advisor-back")) el("advisor-back").onclick = hideReviewView;
+  if (el("advisor-upload")) el("advisor-upload").onclick = uploadDocument;
+  if (el("advisor-run")) el("advisor-run").onclick = runReview;
+  if (el("advisor-modal-close")) el("advisor-modal-close").onclick = closeModal;
+  if (el("advisor-modal-copy")) el("advisor-modal-copy").onclick = copyResults;
 }
