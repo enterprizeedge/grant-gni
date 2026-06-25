@@ -16,6 +16,7 @@
 // ---------------------------------------------------------------------------
 
 import fs from "node:fs";
+import path from "node:path";
 import http from "node:http";
 import https from "node:https";
 import express from "express";
@@ -23,12 +24,16 @@ import cors from "cors";
 import dotenv from "dotenv";
 
 import { createGeminiProvider } from "./providers/gemini.js";
+import { createVertexProvider } from "./providers/vertex.js";
 import { generateWithFallback } from "./providers/resilience.js";
 import { retrieve, storeStatus, invalidateStore } from "./knowledge/retriever.js";
 import { advise } from "./knowledge/advisor.js";
 import { ingestTenantText } from "./knowledge/ingest.js";
 import { extractText } from "./knowledge/extract.js";
 import { sanitizeTenantId, tenantDir, tenantStorePath, tenantUploadsDir } from "./knowledge/tenancy.js";
+import { USE_QDRANT, TIER } from "./config/knowledge.js";
+import * as kb from "./knowledge/kb.js";
+import { requireTenant, requireAdmin, AUTH_ENABLED } from "./auth/auth.js";
 
 dotenv.config();
 
@@ -44,10 +49,12 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "*")
   .filter(Boolean);
 const ALLOW_ALL_ORIGINS = ALLOWED_ORIGINS.includes("*");
 
-// ── Provider selection (gemini now; vertex slots in here later) ──────────────
+// ── Provider selection (LLM_PROVIDER = gemini | vertex) ──────────────────────
 function buildProvider() {
   const which = (process.env.LLM_PROVIDER || "gemini").toLowerCase();
   switch (which) {
+    case "vertex":
+      return createVertexProvider();
     case "gemini":
     default:
       return createGeminiProvider({
@@ -87,9 +94,11 @@ app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "grant-gni-backend",
-    version: "0.3.0",
+    version: "0.4.0",
     provider: provider.name,
     providerConfigured: provider.isConfigured(),
+    kbBackend: USE_QDRANT ? "qdrant" : "file",
+    authEnabled: AUTH_ENABLED,
     knowledge,
   });
 });
@@ -132,20 +141,25 @@ app.post("/api/retrieve", async (req, res) => {
   }
 });
 
-// Grounded review. body: { sectionText, program, section?, callId?, tenantId? }
-app.post("/api/advise", async (req, res) => {
-  // NOTE (monetization phase): auth + quota check + usage logging go here too.
-  const { sectionText, program, section, callId, tenantId } = req.body || {};
+// Grounded review. body: { sectionText, program, section?, callId? }
+// tenantId comes from auth (req.tenantId), NOT the body, so it can't be spoofed.
+app.post("/api/advise", requireTenant, async (req, res) => {
+  const { sectionText, program, section, callId } = req.body || {};
   if (!sectionText || !sectionText.trim()) {
     return res.status(400).json({ error: { message: "sectionText is required" } });
   }
   if (!provider.isConfigured()) {
-    return res.status(502).json({
-      error: { message: "LLM provider not configured. Set GEMINI_API_KEY in backend/.env." },
-    });
+    return res.status(502).json({ error: { message: "LLM provider not configured." } });
   }
   try {
-    const result = await advise({ provider, sectionText, program, section, callId, tenantId: tenantId || null });
+    const result = await advise({
+      provider,
+      sectionText,
+      program,
+      section,
+      callId,
+      tenantId: req.tenantId || null,
+    });
     res.json(result);
   } catch (err) {
     console.error("[/api/advise] error:", err);
@@ -153,19 +167,21 @@ app.post("/api/advise", async (req, res) => {
   }
 });
 
-// ── Per-client private knowledge base (upload-only, isolated) ────────────────
+// ── Per-client private knowledge base (tier 3, isolated) ─────────────────────
+// The effective tenant always comes from auth (req.tenantId); the URL :id is
+// ignored when auth is on, so a client can never reach another client's tier-3.
+function tenantOf(req) {
+  return sanitizeTenantId(req.tenantId || req.params.id);
+}
 
-// Upload one document into a client's private KB.
+// Upload one document into the caller's private KB.
 // body: { filename, contentBase64? | text?, program?, docType?, section? }
-app.post("/api/tenant/:id/documents", async (req, res) => {
+app.post("/api/tenant/:id/documents", requireTenant, async (req, res) => {
   let id;
   try {
-    id = sanitizeTenantId(req.params.id);
+    id = tenantOf(req);
   } catch (e) {
     return res.status(400).json({ error: { message: e.message } });
-  }
-  if (!provider.isConfigured()) {
-    return res.status(502).json({ error: { message: "Set GEMINI_API_KEY (used for embeddings) in backend/.env." } });
   }
   try {
     const { filename, contentBase64, text, program, docType, section } = req.body || {};
@@ -174,9 +190,29 @@ app.post("/api/tenant/:id/documents", async (req, res) => {
     if (!extracted) {
       if (!contentBase64) return res.status(400).json({ error: { message: "contentBase64 or text is required" } });
       const buffer = Buffer.from(String(contentBase64).replace(/^data:[^;]+;base64,/, ""), "base64");
-      extracted = extractText(filename, buffer);
+      extracted = await extractText(filename, buffer);
     }
-    const result = await ingestTenantText(id, { filename, text: extracted, program, docType, section });
+
+    let result;
+    if (USE_QDRANT) {
+      result = await kb.ingestText({
+        tier: TIER.CLIENT,
+        tenantId: id,
+        filename,
+        text: extracted,
+        meta: { program, docType, section },
+      });
+      // Keep a lightweight filename record so the UI's file list + GDPR delete work.
+      try {
+        const dir = tenantUploadsDir(id);
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, String(filename).replace(/[^\w.-]/g, "_")), "");
+      } catch (e) {
+        console.warn("[tenant upload] could not record filename:", e.message);
+      }
+    } else {
+      result = await ingestTenantText(id, { filename, text: extracted, program, docType, section });
+    }
     res.json(result);
   } catch (err) {
     console.error("[/api/tenant upload] error:", err);
@@ -184,11 +220,11 @@ app.post("/api/tenant/:id/documents", async (req, res) => {
   }
 });
 
-// A client's private KB status + uploaded file list.
-app.get("/api/tenant/:id/status", (req, res) => {
+// The caller's private KB status + uploaded file list.
+app.get("/api/tenant/:id/status", requireTenant, async (req, res) => {
   let id;
   try {
-    id = sanitizeTenantId(req.params.id);
+    id = tenantOf(req);
   } catch (e) {
     return res.status(400).json({ error: { message: e.message } });
   }
@@ -199,24 +235,83 @@ app.get("/api/tenant/:id/status", (req, res) => {
   } catch {
     uploads = [];
   }
-  res.json({ ...storeStatus(id), uploads });
+  try {
+    if (USE_QDRANT) {
+      const s = await kb.status(id);
+      return res.json({ tenant: { tenantId: id, size: (s.tenant && s.tenant.size) || 0 }, uploads, backend: "qdrant" });
+    }
+    return res.json({ ...storeStatus(id), uploads });
+  } catch (err) {
+    return res.status(500).json({ error: { message: err.message } });
+  }
 });
 
-// GDPR deletion: wipe a client's private KB entirely.
-app.delete("/api/tenant/:id/documents", (req, res) => {
+// GDPR deletion: wipe the caller's private KB entirely (vectors + records).
+app.delete("/api/tenant/:id/documents", requireTenant, async (req, res) => {
   let id;
   try {
-    id = sanitizeTenantId(req.params.id);
+    id = tenantOf(req);
   } catch (e) {
     return res.status(400).json({ error: { message: e.message } });
   }
   try {
+    if (USE_QDRANT) await kb.deleteTenant(id);
     const dir = tenantDir(id);
     if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
     invalidateStore(tenantStorePath(id));
     res.json({ ok: true, tenantId: id, deleted: true });
   } catch (err) {
     res.status(500).json({ error: { message: err.message } });
+  }
+});
+
+// ── Admin: bootstrap collections + ingest shared knowledge (tiers 1 & 2) ─────
+// Protected by ADMIN_TOKEN when auth is enabled.
+app.post("/api/admin/bootstrap", requireAdmin, async (_req, res) => {
+  try {
+    const r = await kb.ensureCollections();
+    res.json({ ok: true, ...r });
+  } catch (err) {
+    res.status(500).json({ error: { message: err.message } });
+  }
+});
+
+// body: { tier: 1|2|3, tenantId?, filename, contentBase64? | text?, programme?, docType?, section?, callId?, cluster?, topic?, trl?, country? }
+app.post("/api/admin/ingest", requireAdmin, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const tier = Number(b.tier);
+    if (![TIER.PUBLIC, TIER.IP, TIER.CLIENT].includes(tier)) {
+      return res.status(400).json({ error: { message: "tier must be 1 (public), 2 (IP) or 3 (client)" } });
+    }
+    let extracted = b.text;
+    if (!extracted) {
+      if (!b.contentBase64) return res.status(400).json({ error: { message: "contentBase64 or text is required" } });
+      const buffer = Buffer.from(String(b.contentBase64).replace(/^data:[^;]+;base64,/, ""), "base64");
+      extracted = await extractText(b.filename, buffer);
+    }
+    const meta = {
+      programme: b.programme || b.program || null,
+      docType: b.docType || null,
+      section: b.section || null,
+      callId: b.callId || null,
+      cluster: b.cluster ?? null,
+      topic: b.topic ?? null,
+      trl: b.trl ?? null,
+      country: b.country ?? null,
+      source: b.filename || null,
+    };
+    const r = await kb.ingestText({
+      tier,
+      tenantId: tier === TIER.CLIENT ? b.tenantId : null,
+      filename: b.filename,
+      text: extracted,
+      meta,
+    });
+    res.json({ ok: true, ...r });
+  } catch (err) {
+    console.error("[/api/admin/ingest] error:", err);
+    res.status(400).json({ error: { message: err.message } });
   }
 });
 

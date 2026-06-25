@@ -28,7 +28,18 @@ jobs:
         run: |
           cd backend
 
+          # --update-env-vars / --update-secrets are NON-destructive: they add/replace
+          # only the listed keys and leave existing env (e.g. GEMINI_API_KEY) intact.
+          # Secrets sa_key, QDRANT_URL, QDRANT_API_KEY must exist in Secret Manager and
+          # the Cloud Run runtime service account must have roles/secretmanager.secretAccessor.
+          # NOTE: this wires up secrets + static config but does NOT flip the system
+          # to Vertex/Qdrant. The cutover switches (KB_BACKEND, LLM_PROVIDER,
+          # EMBED_PROVIDER) are set deliberately by you once verified — see
+          # V3_VECTOR_DB_SETUP.md. Leaving them out preserves the current behaviour.
+          # --update-* flags are non-destructive (existing env like GEMINI_API_KEY stays).
           gcloud run deploy ${{ secrets.CLOUD_RUN_SERVICE }} \
             --source . \
             --region ${{ secrets.GCP_REGION }} \
-            --allow-unauthenticated
+            --allow-unauthenticated \
+            --update-env-vars GCP_PROJECT=grant-gni,GCP_REGION=europe-west1,VERTEX_LOCATION=europe-west1,VERTEX_RANK_LOCATION=global,VERTEX_RANK_MODEL=semantic-ranker-default-004,VERTEX_GEN_MODEL=gemini-2.5-flash,EMBED_MODEL=gemini-embedding-001,EMBED_DIM=1536 \
+            --update-secrets SA_KEY=sa_key:latest,QDRANT_URL=QDRANT_URL:latest,QDRANT_API_KEY=QDRANT_API_KEY:latest

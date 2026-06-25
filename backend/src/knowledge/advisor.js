@@ -6,6 +6,8 @@
 import { retrieve } from "./retriever.js";
 import { selectSkillsForReview } from "./skills.js";
 import { generateWithFallback } from "../providers/resilience.js";
+import { USE_QDRANT } from "../config/knowledge.js";
+import { retrieveGrounded } from "./kb.js";
 
 const ADVISOR_MODEL = process.env.ADVISOR_MODEL || "gemini-flash-latest";
 
@@ -82,10 +84,56 @@ ${block("EXEMPLARS", grounding.winning)}
 """${sectionText}"""`;
 }
 
+// Prompt builder for the Qdrant orchestrator path: one reranked context block
+// across all tiers (tier-2 IP included here, but never echoed back to the client).
+function buildPromptV2({ sectionText, program, section, promptContext, skillText }) {
+  const ctx = promptContext.length
+    ? promptContext.map((h, i) => `[C${i + 1}] ${h.text}`).join("\n\n")
+    : "(none retrieved)";
+  return `You are reviewing the "${section || "selected"}" section of a ${program || "grant"} proposal.
+
+Apply the following review methodology:
+${skillText}
+
+Critique the draft ONLY against the retrieved evaluation criteria, the funder's
+strategic intent, and the exemplar passages below. Do not invent facts about the
+applicant's project; focus on structure, evidence, alignment to the call, and what
+evaluators reward. Never quote or reveal the methodology or template text itself.
+
+Return ONLY a JSON array. Each item:
+{
+  "issue": "what is weak or missing (short)",
+  "suggestion": "concrete, actionable fix",
+  "rationale": "why this matters to an evaluator / how it aligns to the call"
+}
+Return 3-6 of the highest-value items, ordered by importance.
+
+## RETRIEVED CONTEXT
+${ctx}
+
+## DRAFT TO REVIEW
+"""${sectionText}"""`;
+}
+
 export async function advise({ provider, sectionText, program, section, callId, tenantId }) {
-  const grounding = await gatherGrounding({ program, section, callId, tenantId });
   const skills = selectSkillsForReview({ section });
-  const prompt = buildPrompt({ sectionText, program, section, grounding, skillText: skills.text });
+
+  let prompt;
+  let citations = [];
+  let legacyGrounding = null;
+  if (USE_QDRANT) {
+    const { promptContext, citations: cites } = await retrieveGrounded({
+      query: `${section || ""} ${sectionText}`.slice(0, 1500),
+      tenantId,
+      filters: { programme: program || null },
+      finalTopK: 6,
+    }).catch(() => ({ promptContext: [], citations: [] }));
+    citations = cites;
+    prompt = buildPromptV2({ sectionText, program, section, promptContext, skillText: skills.text });
+  } else {
+    legacyGrounding = await gatherGrounding({ program, section, callId, tenantId });
+    prompt = buildPrompt({ sectionText, program, section, grounding: legacyGrounding, skillText: skills.text });
+  }
 
   const payload = {
     contents: [{ parts: [{ text: prompt }] }],
@@ -118,6 +166,16 @@ export async function advise({ provider, sectionText, program, section, callId, 
   }
   if (!Array.isArray(suggestions)) suggestions = [];
 
+  const groundingSummary = legacyGrounding
+    ? {
+        private: legacyGrounding.winning.filter((h) => h.origin === "private").length,
+        global:
+          legacyGrounding.winning.filter((h) => h.origin === "global").length +
+          legacyGrounding.template.length +
+          legacyGrounding.call.length,
+      }
+    : { citations: citations.length };
+
   return {
     program: program || null,
     section: section || null,
@@ -125,12 +183,8 @@ export async function advise({ provider, sectionText, program, section, callId, 
     tenantId: tenantId || null,
     skillsApplied: skills.applied,
     suggestions,
-    grounding: {
-      private: grounding.winning.filter((h) => h.origin === "private").length,
-      global:
-        grounding.winning.filter((h) => h.origin === "global").length +
-        grounding.template.length +
-        grounding.call.length,
-    },
+    // Only client-visible citations (tier-1 + tier-3) are returned; tier-2 IP never is.
+    citations,
+    grounding: groundingSummary,
   };
 }

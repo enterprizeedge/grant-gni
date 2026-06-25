@@ -21,6 +21,8 @@
 // only vector-store.js changes — this file's interface stays the same.
 // ---------------------------------------------------------------------------
 
+import { vertexEmbedProvider } from "../providers/vertex.js";
+
 const LOCAL_DIM = 256;
 
 // Known native output dimensionality per Gemini embedding model. gemini-embedding-001
@@ -118,6 +120,11 @@ function createGeminiProvider({ apiKey, apiBase, model, dim }) {
 
 export function createEmbeddingProvider(env = process.env) {
   const which = (env.EMBED_PROVIDER || "local").toLowerCase();
+  if (which === "vertex") {
+    // Vertex AI gemini-embedding-001. Same { name, model, dim, isConfigured, embed }
+    // interface; independent of the chat/Review LLM.
+    return vertexEmbedProvider();
+  }
   if (which === "gemini") {
     return createGeminiProvider({
       apiKey: env.GEMINI_API_KEY,

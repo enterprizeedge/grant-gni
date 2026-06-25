@@ -4,7 +4,8 @@ WORKDIR /app
 
 COPY package*.json ./
 
-RUN npm ci --omit=dev
+# npm install (not ci) so newly added deps resolve even if the lockfile predates them.
+RUN npm install --omit=dev
 
 COPY . .
 

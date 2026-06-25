@@ -24,6 +24,17 @@ function setTenantId(v) {
   if (v && v.trim()) localStorage.setItem("grantGniTenantId", v.trim());
 }
 
+// The client's issued API key (set when auth is enabled on the backend). When
+// present it's sent as a Bearer token; the backend resolves tenant from it so the
+// tenant can't be spoofed. Empty in dev (AUTH_ENABLED=false) — header is omitted.
+function getClientKey() {
+  return (localStorage.getItem("grantGniClientKey") || "").trim();
+}
+function authHeaders(base = {}) {
+  const key = getClientKey();
+  return key ? { ...base, Authorization: `Bearer ${key}` } : { ...base };
+}
+
 function showReviewView() {
   const main = el("main-view");
   const settings = el("settings-view");
@@ -66,7 +77,9 @@ async function refreshKbStatus() {
   const status = el("advisor-kb-status");
   if (!status) return;
   try {
-    const res = await fetch(`${backendBase()}/api/tenant/${encodeURIComponent(getTenantId())}/status`);
+    const res = await fetch(`${backendBase()}/api/tenant/${encodeURIComponent(getTenantId())}/status`, {
+      headers: authHeaders(),
+    });
     if (!res.ok) {
       status.textContent = "";
       return;
@@ -107,7 +120,7 @@ async function uploadDocument() {
     const dataUrl = await readFileAsDataUrl(file);
     const res = await fetch(`${backendBase()}/api/tenant/${encodeURIComponent(getTenantId())}/documents`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ filename: file.name, contentBase64: dataUrl, program, docType, section: section || null }),
     });
     const d = await res.json();
@@ -228,13 +241,13 @@ async function runReview() {
     }
     const res = await fetch(`${backendBase()}/api/advise`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
         sectionText: text,
         program,
         section: section || null,
         callId: callId || null,
-        tenantId: getTenantId(),
+        tenantId: getTenantId(), // ignored by backend when auth is on (uses the key)
       }),
     });
     const d = await res.json().catch(() => ({}));
