@@ -262,6 +262,7 @@ let chatHistory = [];
 let toolsExecutedInCurrentRequest = [];  // Track successful tool executions for recovery
 
 Office.onReady((info) => {
+  try {
   if (info.host === Office.HostType.Word) {
     setPlatform(Office?.context?.platform);
     document.getElementById("sideload-msg").style.display = "none";
@@ -365,6 +366,27 @@ Office.onReady((info) => {
 
     // Update checkpoint status on load (internal only now)
     // updateCheckpointStatus(); // UI removed, but we can keep tracking internally if needed, or just remove this call.
+  } else {
+    // Office initialised but NOT as Word — surface it instead of a silent dead pane.
+    const sm = document.getElementById("sideload-msg");
+    if (sm) {
+      sm.style.display = "block";
+      sm.innerHTML =
+        `<h1 class="ms-font-xl">Open Grant Gni inside Microsoft Word.</h1>` +
+        `<p>Detected host: <b>${info && info.host}</b>. The task pane only works when the ` +
+        `add-in is sideloaded in Word — not in a plain browser tab.</p>`;
+    }
+  }
+  } catch (e) {
+    // Make init failures visible (our custom menu overrides right-click "Inspect").
+    console.error("Grant Gni init failed:", e);
+    document.body.insertAdjacentHTML(
+      "afterbegin",
+      `<div style="padding:12px;margin:8px;border:1px solid #a80000;border-radius:6px;` +
+        `color:#a80000;background:#fde7e9;font:13px/1.4 sans-serif">` +
+        `Grant Gni failed to start: ${(e && e.message) || e}<br>` +
+        `<small>Shift+right-click &rarr; Inspect &rarr; Console for the full stack.</small></div>`
+    );
   }
 });
 
@@ -612,6 +634,7 @@ function setupCustomContextMenu() {
   ];
 
   document.addEventListener("contextmenu", (e) => {
+    if (e.shiftKey) return; // Shift+right-click -> native menu (Inspect) for debugging
     e.preventDefault(); // suppress the default WebView dev menu
     closeMenu();
     menu = document.createElement("div");
@@ -667,8 +690,8 @@ function loadModel(type = 'fast') {
   if (storedModel && storedModel.trim() !== "") {
     return storedModel;
   }
-  // Defaults
-  return type === 'slow' ? "gemini-2.5-pro" : "gemini-flash-latest";
+  // Defaults (valid Vertex model IDs)
+  return type === 'slow' ? "gemini-2.5-pro" : "gemini-2.5-flash";
 }
 
 function loadSystemMessage() {

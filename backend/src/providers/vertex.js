@@ -14,6 +14,31 @@ function vertexBase(location = GCP.location) {
   return `https://${location}-aiplatform.googleapis.com/v1/projects/${GCP.project}/locations/${location}/publishers/google/models`;
 }
 
+// Vertex uses different model IDs than the Gemini API (AI Studio). The add-in and
+// the resilience fallback chain may request Gemini-API aliases (…-latest) or
+// retired versions (2.0/1.5), which 404 on Vertex. Map everything to a currently
+// GA Vertex model; anything unknown falls back to the configured default.
+const VERTEX_KNOWN = new Set(["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"]);
+const VERTEX_ALIASES = {
+  "gemini-flash-latest": "gemini-2.5-flash",
+  "gemini-flash-lite-latest": "gemini-2.5-flash-lite",
+  "gemini-pro-latest": "gemini-2.5-pro",
+  "gemini-2.5-pro-latest": "gemini-2.5-pro",
+  "gemini-2.5-flash-latest": "gemini-2.5-flash",
+  "gemini-1.5-flash": "gemini-2.5-flash",
+  "gemini-1.5-pro": "gemini-2.5-pro",
+  "gemini-2.0-flash": "gemini-2.5-flash",
+  "gemini-2.0-flash-lite": "gemini-2.5-flash-lite",
+  "gemini-3.5-flash": "gemini-2.5-flash",
+  "gemini-3.1-pro-preview": "gemini-2.5-pro",
+};
+function normalizeVertexModel(model) {
+  const m = String(model || "").trim();
+  if (VERTEX_KNOWN.has(m)) return m;
+  if (VERTEX_ALIASES[m]) return VERTEX_ALIASES[m];
+  return GCP.genModel; // safe, configurable default (gemini-2.5-flash)
+}
+
 async function authedFetch(url, body) {
   const token = await getAccessToken();
   const res = await fetch(url, {
@@ -33,7 +58,7 @@ export function createVertexProvider() {
     },
     // model: e.g. "gemini-2.5-flash"; payload: Gemini generateContent body (verbatim).
     async generateContent(model, payload /*, signal */) {
-      const safeModel = encodeURIComponent(model || GCP.genModel);
+      const safeModel = encodeURIComponent(normalizeVertexModel(model));
       const url = `${vertexBase()}/${safeModel}:generateContent`;
       try {
         const res = await authedFetch(url, payload);
