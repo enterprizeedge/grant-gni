@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0" xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="TaskPaneApp">
   <Id>3dcfdb34-70c3-4bfe-8d5e-85089afcf673</Id>
-  <Version>1.3.1.0</Version>
+  <Version>1.4.0.0</Version>
   <ProviderName>Zavion Technologies</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="Grant Gni"/>
@@ -12,8 +12,8 @@
   <SupportUrl DefaultValue="https://www.zaviontechnologies.com/grant-gni/support"/>
   <AppDomains>
     <AppDomain>https://www.zaviontechnologies.com</AppDomain>
-    <!-- Grant Gni backend gateway. Add your production backend domain here too. -->
-    <AppDomain>https://localhost:3001</AppDomain>
+    <!-- Grant Gni backend gateway (Cloud Run). -->
+    <AppDomain>https://grant-gni-backend-418969920062.europe-west1.run.app</AppDomain>
   </AppDomains>
   <Hosts>
     <Host Name="Document"/>

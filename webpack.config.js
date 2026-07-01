@@ -80,6 +80,13 @@ module.exports = async (env, options) => {
             to: "shortcuts.json",
           },
           {
+            // Cloudflare Pages cache-control rules; copied to the dist root.
+            from: "_headers",
+            to: "_headers",
+            toType: "file",
+            noErrorOnMissing: true,
+          },
+          {
             from: "manifest*.xml",
             to: "[name]" + "[ext]",
             transform(content) {

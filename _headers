@@ -1,0 +1,14 @@
+# Cloudflare Pages headers for the Grant Gni add-in.
+# The JS/HTML/CSS bundles use fixed (non-hashed) names, so tell browsers/Word not
+# to cache them — otherwise testers get a stale task pane after an update.
+/*.html
+  Cache-Control: no-cache
+/*.js
+  Cache-Control: no-cache
+/taskpane.css
+  Cache-Control: no-cache
+/manifest.xml
+  Cache-Control: no-cache
+# Icons are safe to cache.
+/assets/*
+  Cache-Control: public, max-age=86400

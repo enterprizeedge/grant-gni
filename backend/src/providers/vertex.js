@@ -39,6 +39,31 @@ function normalizeVertexModel(model) {
   return GCP.genModel; // safe, configurable default (gemini-2.5-flash)
 }
 
+// The add-in's Checklist sends the AI-Studio built-in Google Search grounding tool
+// (`google_search`), which Vertex generateContent rejects → the whole request
+// errors ("Error running check"). Strip built-in search tools for Vertex while
+// keeping everything else (function declarations, etc.). Custom function calling
+// is unaffected. Later we can wire Vertex-native grounding deliberately.
+const VERTEX_SEARCH_TOOL_KEYS = new Set([
+  "google_search",
+  "googleSearch",
+  "google_search_retrieval",
+  "googleSearchRetrieval",
+]);
+function sanitizeVertexPayload(payload) {
+  if (!payload || typeof payload !== "object" || !Array.isArray(payload.tools)) return payload;
+  const p = { ...payload };
+  p.tools = p.tools
+    .map((t) =>
+      t && typeof t === "object"
+        ? Object.fromEntries(Object.entries(t).filter(([k]) => !VERTEX_SEARCH_TOOL_KEYS.has(k)))
+        : t
+    )
+    .filter((t) => t && Object.keys(t).length > 0); // drop now-empty tool objects
+  if (p.tools.length === 0) delete p.tools;
+  return p;
+}
+
 async function authedFetch(url, body) {
   const token = await getAccessToken();
   const res = await fetch(url, {
@@ -61,7 +86,7 @@ export function createVertexProvider() {
       const safeModel = encodeURIComponent(normalizeVertexModel(model));
       const url = `${vertexBase()}/${safeModel}:generateContent`;
       try {
-        const res = await authedFetch(url, payload);
+        const res = await authedFetch(url, sanitizeVertexPayload(payload));
         const body = await res.text();
         return { status: res.status, body };
       } catch (err) {
