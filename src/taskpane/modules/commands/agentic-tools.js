@@ -19,6 +19,7 @@ import {
 import {
   resolveInsertListItemLevel
 } from './list-level-utils.js';
+import { appHeaders } from '../backend/app-token.js';
 
 let loadApiKey;
 let loadModel;
@@ -27,7 +28,7 @@ let loadRedlineSetting;
 let loadRedlineAuthor;
 let setChangeTrackingForAi;
 let restoreChangeTracking;
-let SAFETY_SETTINGS_BLOCK_NONE;
+let loadSafetySettings;
 let API_LIMITS;
 let buildBackendUrl;
 
@@ -40,7 +41,7 @@ function initAgenticTools(deps) {
     loadRedlineAuthor,
     setChangeTrackingForAi,
     restoreChangeTracking,
-    SAFETY_SETTINGS_BLOCK_NONE,
+    loadSafetySettings,
     API_LIMITS,
     buildBackendUrl
   } = deps);
@@ -275,7 +276,7 @@ async function callGeminiForDiffs(prompt) {
   const payload = {
     contents: [{ parts: [{ text: prompt }] }],
     systemInstruction: systemInstruction,
-    safetySettings: SAFETY_SETTINGS_BLOCK_NONE,
+    safetySettings: loadSafetySettings(),
     generationConfig: {
       temperature: 0.1,
       maxOutputTokens: API_LIMITS.MAX_OUTPUT_TOKENS,
@@ -287,7 +288,7 @@ async function callGeminiForDiffs(prompt) {
   try {
     const response = await fetch(apiUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: appHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(payload),
     });
 
@@ -653,7 +654,7 @@ async function callGeminiForJSON(prompt, schema) {
   const payload = {
     contents: [{ parts: [{ text: prompt }] }],
     systemInstruction: systemInstruction,
-    safetySettings: SAFETY_SETTINGS_BLOCK_NONE,
+    safetySettings: loadSafetySettings(),
     generationConfig: {
       temperature: 0.2,
       maxOutputTokens: 48000,
@@ -665,7 +666,7 @@ async function callGeminiForJSON(prompt, schema) {
   try {
     const response = await fetch(apiUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: appHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(payload),
     });
 
@@ -703,18 +704,13 @@ async function executeResearch(query) {
   const payload = {
     contents: [{ parts: [{ text: query }] }],
     tools: tools,
-    safetySettings: [
-      { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
-      { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
-      { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
-      { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
-    ]
+    safetySettings: loadSafetySettings()
   };
 
   try {
     const response = await fetch(apiUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: appHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(payload),
     });
 

@@ -1,6 +1,16 @@
 /* global document */
 
 import { marked } from 'marked';
+import DOMPurify from 'dompurify';
+
+// XSS guard (CTO review Rec 5): model output is markdown-rendered into
+// innerHTML. marked does NOT sanitize, so raw HTML in a model response (e.g.
+// echoed from a malicious document — prompt injection) would execute in the
+// task pane with access to localStorage (client key, settings). Everything
+// rendered from model/user content MUST pass through sanitizeHtml().
+function sanitizeHtml(html) {
+  return DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
+}
 
 let onCancelRequest = null;
 let onRestoreCheckpoint = null;
@@ -99,7 +109,7 @@ function addMessageToChat(sender, message, checkpointIndex = -1) {
     renderSystemMessageContent(messageElement, sender, message);
   } else {
     // Render Markdown for user/gemini
-    messageElement.innerHTML = `<strong>${sender}:</strong> <div>${marked.parse(message)}</div>`;
+    messageElement.innerHTML = `<strong>${sender}:</strong> <div>${sanitizeHtml(marked.parse(message))}</div>`;
   }
 
   // Add Revert button if a valid checkpoint index is provided
@@ -159,7 +169,7 @@ function renderSystemMessageContent(element, sender, message) {
     element.appendChild(toggleBtn);
   } else {
     // Render Markdown inline for System messages
-    element.innerHTML = `<strong>${sender}:</strong> <span>${marked.parseInline(message)}</span>`;
+    element.innerHTML = `<strong>${sender}:</strong> <span>${sanitizeHtml(marked.parseInline(message))}</span>`;
   }
 }
 

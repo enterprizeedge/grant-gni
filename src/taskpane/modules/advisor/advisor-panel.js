@@ -1,5 +1,7 @@
 /* global Word, document, fetch, FileReader, navigator */
 
+import { appHeaders } from "../backend/app-token.js";
+
 // Grant Gni — Review panel.
 // Reviews the current section of the proposal against the client's own uploaded
 // proposals (private KB), the shared program template/call context, and the shared
@@ -32,7 +34,10 @@ function getClientKey() {
 }
 function authHeaders(base = {}) {
   const key = getClientKey();
-  return key ? { ...base, Authorization: `Bearer ${key}` } : { ...base };
+  // Always include the shared app token (backend abuse gate); add the client's
+  // Bearer key when one has been issued (real per-tenant auth).
+  const withApp = appHeaders(base);
+  return key ? { ...withApp, Authorization: `Bearer ${key}` } : withApp;
 }
 
 function showReviewView() {

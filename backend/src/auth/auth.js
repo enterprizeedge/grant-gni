@@ -54,9 +54,21 @@ export function requireTenant(req, res, next) {
   return next();
 }
 
+// FAIL CLOSED: admin endpoints (ingest/seed/bootstrap/tenant listing) always
+// require ADMIN_TOKEN, regardless of AUTH_ENABLED. Previously these were open
+// whenever auth was off — which meant anyone could ingest into (or rebuild)
+// the shared knowledge base on a deployed instance. For local dev, set a
+// throwaway ADMIN_TOKEN in backend/.env.
 export function requireAdmin(req, res, next) {
-  if (!AUTH_ENABLED) return next(); // dev convenience
-  if (!ADMIN_TOKEN || bearer(req) !== ADMIN_TOKEN) {
+  if (!ADMIN_TOKEN) {
+    return res.status(503).json({
+      error: {
+        message:
+          "Admin endpoints are disabled: ADMIN_TOKEN is not configured. Set it in backend/.env (dev) or Secret Manager (prod).",
+      },
+    });
+  }
+  if (bearer(req) !== ADMIN_TOKEN) {
     return res.status(401).json({ error: { message: "Unauthorized: admin token required." } });
   }
   return next();

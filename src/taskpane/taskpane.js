@@ -44,6 +44,25 @@ import {
 } from './modules/commands/agentic-tools.js';
 import { setPlatform } from '@ansonlai/docx-redline-js';
 import { initAdvisorPanel } from './modules/advisor/advisor-panel.js';
+import {
+  loadSafetySettings,
+  loadSafetyMode,
+  saveSafetyMode,
+  loadModel,
+  saveModel,
+  loadSystemMessage,
+  saveSystemMessage,
+  loadRedlineSetting,
+  saveRedlineSetting,
+  loadRedlineAuthor,
+  saveRedlineAuthor,
+  loadGlanceSettings,
+  saveGlanceSettings,
+  loadGlanceCollapsedState,
+  saveGlanceCollapsedState
+} from './modules/settings/settings-store.js';
+import { restoreCheckpoint, createCheckpoint } from './modules/checkpoints/checkpoints.js';
+import { appHeaders } from './modules/backend/app-token.js';
 
 // Configure marked for GFM (GitHub Flavored Markdown) with tables, breaks, etc.
 marked.setOptions({
@@ -52,17 +71,9 @@ marked.setOptions({
 });
 
 // ==================== CONFIGURATION CONSTANTS ====================
-
-const DEFAULT_AUTHOR = "Gemini AI";
-const GLANCE_COLLAPSED_STORAGE_KEY = "glanceCollapsed";
-
-// Safety settings for Gemini API (disable all safety blocks)
-const SAFETY_SETTINGS_BLOCK_NONE = [
-  { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
-  { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
-  { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
-  { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
-];
+// (DEFAULT_AUTHOR, safety settings, and all localStorage-backed preferences now
+// live in modules/settings/settings-store.js. Checkpoints live in
+// modules/checkpoints/checkpoints.js.)
 
 // Search and text limits
 const SEARCH_LIMITS = {
@@ -82,12 +93,6 @@ const DOCUMENT_LIMITS = {
   MAX_LOOPS: 6,              // Maximum tool execution loops
   MAX_NO_PROGRESS_TOOL_LOOPS: 2, // Stop when the same mutation tool cycle keeps applying 0 changes
   TOKEN_MULTIPLIER: 1.33     // Words to tokens conversion factor
-};
-
-// Storage quotas
-const STORAGE_LIMITS = {
-  SAFE_LIMIT: 4500000,       // ~4.5MB safe limit for localStorage
-  MIN_PRUNE_COUNT: 5         // Minimum checkpoints to prune when quota exceeded
 };
 
 // API generation limits
@@ -524,6 +529,10 @@ function showSettingsView() {
   // Load redline author setting
   const redlineAuthor = loadRedlineAuthor();
   document.getElementById("redline-author-input").value = redlineAuthor;
+
+  // Load AI safety filter setting
+  const safetySelect = document.getElementById("safety-mode-select");
+  if (safetySelect) safetySelect.value = loadSafetyMode();
 }
 
 function showMainView() {
@@ -583,11 +592,13 @@ function saveApiKey() {
   const redlineEnabled = document.getElementById("redline-toggle").checked;
   const redlineAuthor = document.getElementById("redline-author-input").value;
 
-  localStorage.setItem("geminiModelFast", fastModel);
-  localStorage.setItem("geminiModelSlow", slowModel);
-  localStorage.setItem("geminiSystemMessage", systemMessage);
+  saveModel('fast', fastModel);
+  saveModel('slow', slowModel);
+  saveSystemMessage(systemMessage);
   saveRedlineSetting(redlineEnabled);
   saveRedlineAuthor(redlineAuthor);
+  const safetySelect = document.getElementById("safety-mode-select");
+  if (safetySelect) saveSafetyMode(safetySelect.value);
   // Glance settings are saved automatically on change
   showMainView();
   addMessageToChat("System", "Settings saved successfully.");
@@ -684,46 +695,8 @@ function loadApiKey() {
   return "managed-by-backend";
 }
 
-function loadModel(type = 'fast') {
-  const key = type === 'slow' ? "geminiModelSlow" : "geminiModelFast";
-  const storedModel = localStorage.getItem(key);
-  if (storedModel && storedModel.trim() !== "") {
-    return storedModel;
-  }
-  // Defaults (valid Vertex model IDs)
-  return type === 'slow' ? "gemini-2.5-pro" : "gemini-2.5-flash";
-}
-
-function loadSystemMessage() {
-  const storedMessage = localStorage.getItem("geminiSystemMessage");
-  if (storedMessage && storedMessage.trim() !== "") {
-    return storedMessage;
-  }
-  return "Example: You are assisting an undergraduate student with their academic paper. You must be specific, precise, and double-check all your advice and suggested changes. Maintain a cheerful and helpful tone.";
-}
-
-function loadRedlineSetting() {
-  const storedSetting = localStorage.getItem("redlineEnabled");
-  return storedSetting !== null ? storedSetting === "true" : true; // Default to true (enabled)
-}
-
-function saveRedlineSetting(enabled) {
-  localStorage.setItem("redlineEnabled", enabled.toString());
-}
-
-function loadRedlineAuthor() {
-  const storedAuthor = localStorage.getItem("redlineAuthor");
-  if (storedAuthor && storedAuthor.trim() !== "") {
-    return storedAuthor;
-  }
-  return DEFAULT_AUTHOR; // Unified default fallback
-}
-
-function saveRedlineAuthor(author) {
-  if (author !== undefined && author !== null) {
-    localStorage.setItem("redlineAuthor", author.toString());
-  }
-}
+// loadModel / loadSystemMessage / redline preference helpers moved to
+// modules/settings/settings-store.js (imported above).
 
 async function setChangeTrackingForAi(context, redlineEnabled, sourceLabel = "AI") {
   let originalMode = null;
@@ -773,7 +746,7 @@ initAgenticTools({
   setChangeTrackingForAi,
   restoreChangeTracking,
   SEARCH_LIMITS,
-  SAFETY_SETTINGS_BLOCK_NONE,
+  loadSafetySettings,
   API_LIMITS,
   buildBackendUrl
 });
@@ -799,33 +772,8 @@ async function fetchDocumentAuthor() {
   }
 }
 
-function loadGlanceSettings() {
-  const stored = localStorage.getItem("glanceSettings");
-  if (stored) {
-    try {
-      return JSON.parse(stored);
-    } catch (e) {
-      console.error("Error parsing glance settings", e);
-    }
-  }
-  // Default fallback
-  return [
-    { id: 'q1', title: 'Grammar & Spelling', question: 'Are there any glaring spelling or grammatical issues?' },
-    { id: 'q2', title: 'Factual Accuracy', question: 'Is this document factually accurate?' }
-  ];
-}
-
-function saveGlanceSettings(settings) {
-  localStorage.setItem("glanceSettings", JSON.stringify(settings));
-}
-
-function loadGlanceCollapsedState() {
-  return localStorage.getItem(GLANCE_COLLAPSED_STORAGE_KEY) === "true";
-}
-
-function saveGlanceCollapsedState(isCollapsed) {
-  localStorage.setItem(GLANCE_COLLAPSED_STORAGE_KEY, isCollapsed.toString());
-}
+// Glance settings load/save + collapsed-state helpers moved to
+// modules/settings/settings-store.js (imported above).
 
 function applyGlanceCollapsedState(isCollapsed = loadGlanceCollapsedState()) {
   const container = document.getElementById("glance-container");
@@ -1059,12 +1007,12 @@ async function runGlanceChecks() {
     const payload = {
       contents: [{ parts: [{ text: prompt }] }],
       tools: [{ google_search: {} }],
-      safetySettings: SAFETY_SETTINGS_BLOCK_NONE
+      safetySettings: loadSafetySettings()
     };
 
     const response = await fetch(apiUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: appHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(payload),
     });
 
@@ -1110,150 +1058,8 @@ async function runGlanceChecks() {
 }
 
 // --- Checkpoint Management ---
-
-function getCheckpoints() {
-  const checkpointsJson = localStorage.getItem("docCheckpoints");
-  return checkpointsJson ? JSON.parse(checkpointsJson) : [];
-}
-
-function saveCheckpoints(checkpoints) {
-  const MAX_RETRIES = 10; // Maximum number of retry attempts
-
-  let retries = 0;
-  while (retries < MAX_RETRIES) {
-    try {
-      localStorage.setItem("docCheckpoints", JSON.stringify(checkpoints));
-      return true; // Success
-    } catch (error) {
-      if (error.name === 'QuotaExceededError' && checkpoints.length > 1) {
-        // Remove 50% of checkpoints (more aggressive pruning)
-        const toRemove = Math.max(1, Math.floor(checkpoints.length / 2));
-        checkpoints.splice(0, toRemove);
-        console.warn(`QuotaExceededError: Removed ${toRemove} oldest checkpoint(s), ${checkpoints.length} remaining. Retrying...`);
-        retries++;
-      } else if (error.name === 'QuotaExceededError' && checkpoints.length <= 1) {
-        // Can't prune anymore, clear all and give up gracefully
-        console.warn("Storage quota exceeded. Clearing all checkpoints.");
-        try {
-          localStorage.removeItem("docCheckpoints");
-        } catch (e) { /* ignore */ }
-        return false; // Silently fail rather than throw
-      } else {
-        // Not a quota error
-        console.error("Failed to save checkpoints:", error);
-        return false; // Silently fail rather than throw
-      }
-    }
-  }
-
-  // If we've exhausted retries, fail gracefully
-  console.warn("Unable to save checkpoint after max retries. Clearing checkpoints.");
-  try {
-    localStorage.removeItem("docCheckpoints");
-  } catch (e) { /* ignore */ }
-  return false;
-}
-
-// function updateCheckpointStatus() { ... } removed as UI is gone.
-
-async function createCheckpoint(silent = false) {
-  if (!silent) {
-    addMessageToChat("System", "Saving checkpoint...");
-  }
-  try {
-    return await Word.run(async (context) => {
-      const ooxml = context.document.body.getOoxml();
-      await context.sync();
-
-      // 'ooxml.value' is a base64 string of the entire document body
-      const ooxmlLength = ooxml.value.length;
-      console.log(`Checkpoint OOXML length: ${ooxmlLength}`);
-
-      const checkpoints = getCheckpoints();
-
-      // Check for quota issues roughly (5MB limit usually)
-      let totalSize = 0;
-      checkpoints.forEach(c => totalSize += c.length);
-      console.log(`Current total checkpoints size: ${totalSize}`);
-
-      let prunedCount = 0;
-
-      // Prune at least MIN_PRUNE_COUNT checkpoints if we need to prune any, to create a buffer
-      while ((totalSize + ooxmlLength > STORAGE_LIMITS.SAFE_LIMIT || (prunedCount > 0 && prunedCount < STORAGE_LIMITS.MIN_PRUNE_COUNT)) && checkpoints.length > 0) {
-        const removed = checkpoints.shift(); // Remove oldest
-        totalSize -= removed.length;
-        prunedCount++;
-      }
-
-      if (prunedCount > 0) {
-        console.warn(`LocalStorage quota exceeded. Removed ${prunedCount} oldest checkpoint(s).`);
-        if (!silent) {
-          addMessageToChat("System", `Storage full. Removed ${prunedCount} old checkpoint(s) to make space.`);
-        }
-      }
-
-      checkpoints.push(ooxml.value);
-      saveCheckpoints(checkpoints);
-
-      if (!silent) {
-        addMessageToChat("System", `Checkpoint saved. Total: ${checkpoints.length}`);
-      }
-
-      // Return the index of the newly created checkpoint (0-based)
-      return checkpoints.length - 1;
-    });
-  } catch (error) {
-    console.error("Error saving checkpoint:", error);
-    if (!silent) {
-      addMessageToChat("Error", `Could not save checkpoint. ${error.message}`);
-    }
-    return -1;
-  }
-}
-
-
-async function restoreCheckpoint(index) {
-  const checkpoints = getCheckpoints();
-  if (index < 0 || index >= checkpoints.length) {
-    addMessageToChat("Error", "Invalid checkpoint index.");
-    return;
-  }
-
-  const msgElement = addMessageToChat("System", `Reverting to checkpoint #${index + 1}...`);
-
-  const targetCheckpointOoxml = checkpoints[index];
-
-  try {
-    await Word.run(async (context) => {
-      // Disable Track Changes to avoid "Delete All + Insert All" redlines
-      const doc = context.document;
-      doc.load("changeTrackingMode");
-      await context.sync();
-
-      const originalMode = doc.changeTrackingMode;
-      if (originalMode !== Word.ChangeTrackingMode.off) {
-        doc.changeTrackingMode = Word.ChangeTrackingMode.off;
-        await context.sync();
-      }
-
-      context.document.body.clear(); // Clear the current document body
-      context.document.body.insertOoxml(targetCheckpointOoxml, "Replace");
-      await context.sync();
-
-      // Optionally restore track changes, but reverting usually implies going back to a state.
-      // If we restore it, we might want to do it cleanly.
-      if (originalMode !== Word.ChangeTrackingMode.off) {
-        doc.changeTrackingMode = originalMode;
-        await context.sync();
-      }
-
-      updateSystemMessage(msgElement, "Reverted successfully.");
-    });
-  } catch (error) {
-    console.error("Error reverting checkpoint:", error);
-    updateSystemMessage(msgElement, "Error: Could not revert checkpoint.");
-  }
-}
+// Moved to modules/checkpoints/checkpoints.js (createCheckpoint/restoreCheckpoint
+// imported above; the tool loop below still checkpoints before each mutation).
 
 registerChatUiHandlers({
   onCancelRequest: () => {
@@ -1775,7 +1581,7 @@ CRITICAL: Do NOT use internal paragraph markers (like [P#] or P#) or internal ID
         contents: chatHistory,
         systemInstruction: systemInstruction,
         tools: tools,
-        safetySettings: SAFETY_SETTINGS_BLOCK_NONE,
+        safetySettings: loadSafetySettings(),
         generationConfig: {
           maxOutputTokens: API_LIMITS.MAX_OUTPUT_TOKENS
         },
@@ -2559,7 +2365,7 @@ async function callGeminiWithRetry(url, payload, retries = 3, backoff = 1000) {
 
       const response = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: appHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify(payload),
         signal: fetchController.signal
       });

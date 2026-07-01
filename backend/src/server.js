@@ -15,13 +15,19 @@
 //   DELETE /api/tenant/:id/documents      -> clear a client's private KB (GDPR delete)
 // ---------------------------------------------------------------------------
 
+// Load .env BEFORE any local module is evaluated. ESM imports are hoisted and
+// evaluated in declaration order, so this must stay the FIRST import: auth.js,
+// the middleware, and config/knowledge.js all read process.env at module scope.
+// (Previously dotenv.config() ran after imports, so AUTH_ENABLED / TENANT_KEYS /
+// ADMIN_TOKEN from .env were silently ignored in local dev.)
+import "dotenv/config";
+
 import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
 import https from "node:https";
 import express from "express";
 import cors from "cors";
-import dotenv from "dotenv";
 
 import { createGeminiProvider } from "./providers/gemini.js";
 import { createVertexProvider } from "./providers/vertex.js";
@@ -35,16 +41,18 @@ import { USE_QDRANT, TIER } from "./config/knowledge.js";
 import * as kb from "./knowledge/kb.js";
 import { seedSynthetic } from "./knowledge/seed.js";
 import { requireTenant, requireAdmin, AUTH_ENABLED } from "./auth/auth.js";
-
-dotenv.config();
+import { rateLimit } from "./middleware/rate-limit.js";
+import { requireAppToken } from "./middleware/app-token.js";
+import { requestLog, extractUsage } from "./middleware/request-log.js";
 
 const PORT = Number(process.env.PORT) || 3001;
 const USE_HTTPS = String(process.env.USE_HTTPS || "true").toLowerCase() === "true";
-// CORS origins. Use "*" (default) to reflect any origin — safe here because the
-// add-in sends no cookies/credentials, and an Office task pane's origin can vary
-// (https://localhost:3000 in dev, the WebView host in production). Set a specific
-// comma-separated allow-list via ALLOWED_ORIGINS once the production origin is fixed.
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "*")
+// CORS origins. Defaults to the known task-pane origins (production Pages site +
+// local dev server). Override with a comma-separated ALLOWED_ORIGINS, or set "*"
+// explicitly to reflect any origin (NOT recommended in production — it lets any
+// website drive this backend from a browser).
+const DEFAULT_ORIGINS = "https://grant-gni.pages.dev,https://localhost:3000";
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || DEFAULT_ORIGINS)
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
@@ -79,11 +87,12 @@ const corsOptions = {
     return cb(null, ALLOWED_ORIGINS.includes(origin)); // never throw
   },
   methods: ["GET", "POST", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-App-Token"],
   maxAge: 86400,
 };
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions)); // answer all preflights explicitly
+app.use(requestLog); // structured JSON logs (spend/abuse visibility in Cloud Logging)
 
 app.get("/health", (_req, res) => {
   let knowledge = null;
@@ -105,8 +114,9 @@ app.get("/health", (_req, res) => {
 });
 
 // Mirror of Gemini's generateContent. Body passed through; response verbatim.
-app.post("/api/generate", async (req, res) => {
-  // NOTE (monetization phase): authenticate + check quota + log usage here.
+// Protected by: app token (proves the caller is our add-in build) + per-caller
+// rate limit / daily quota. Per-tenant billing/metering plugs in at the same seam.
+app.post("/api/generate", requireAppToken, rateLimit, async (req, res) => {
   const model = req.query.model || (req.body && req.body.model) || "gemini-flash-latest";
   if (!provider.isConfigured()) {
     return res.status(502).json({
@@ -123,6 +133,7 @@ app.post("/api/generate", async (req, res) => {
     if (modelUsed && modelUsed !== String(model)) {
       res.setHeader("X-Model-Used", modelUsed); // visibility into fallbacks
     }
+    res.locals.usage = extractUsage(body); // token counts -> structured request log
     res.status(status).type("application/json").send(body);
   } catch (err) {
     console.error("[/api/generate] proxy error:", err);
@@ -130,12 +141,15 @@ app.post("/api/generate", async (req, res) => {
   }
 });
 
-// Raw retrieval. body: { query, topK?, filter?, tenantId? }
-app.post("/api/retrieve", async (req, res) => {
+// Raw retrieval. body: { query, topK?, filter? }
+// requireTenant binds the tenant server-side (same rule as /api/advise), so a
+// caller can no longer read another tenant's private store by naming it in the
+// body. Rate-limited like every LLM/vector endpoint.
+app.post("/api/retrieve", requireAppToken, rateLimit, requireTenant, async (req, res) => {
   try {
-    const { query, topK, filter, tenantId } = req.body || {};
+    const { query, topK, filter } = req.body || {};
     if (!query) return res.status(400).json({ error: { message: "query is required" } });
-    const hits = await retrieve(String(query), { topK, filter, tenantId: tenantId || null });
+    const hits = await retrieve(String(query), { topK, filter, tenantId: req.tenantId || null });
     res.json({ hits });
   } catch (err) {
     res.status(500).json({ error: { message: err.message } });
@@ -144,7 +158,7 @@ app.post("/api/retrieve", async (req, res) => {
 
 // Grounded review. body: { sectionText, program, section?, callId? }
 // tenantId comes from auth (req.tenantId), NOT the body, so it can't be spoofed.
-app.post("/api/advise", requireTenant, async (req, res) => {
+app.post("/api/advise", requireAppToken, rateLimit, requireTenant, async (req, res) => {
   const { sectionText, program, section, callId, filters } = req.body || {};
   if (!sectionText || !sectionText.trim()) {
     return res.status(400).json({ error: { message: "sectionText is required" } });
@@ -178,7 +192,7 @@ function tenantOf(req) {
 
 // Upload one document into the caller's private KB.
 // body: { filename, contentBase64? | text?, program?, docType?, section? }
-app.post("/api/tenant/:id/documents", requireTenant, async (req, res) => {
+app.post("/api/tenant/:id/documents", requireAppToken, rateLimit, requireTenant, async (req, res) => {
   let id;
   try {
     id = tenantOf(req);

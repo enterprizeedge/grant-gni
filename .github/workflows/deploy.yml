@@ -6,8 +6,48 @@ on:
       - main
 
 jobs:
+  # ── Backend unit tests: BLOCKING. A failing backend test stops the deploy. ──
+  backend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install backend deps
+        run: cd backend && npm ci --omit=dev || (cd backend && npm install --omit=dev)
+
+      - name: Run backend tests
+        run: cd backend && npm test
+
+  # ── Add-in tests: currently NON-blocking while the baseline is established. ──
+  # TODO(SAM): once this job is green on main, delete `continue-on-error` and add
+  # `addin-tests` to the deploy job's `needs` list so it gates deploys too.
+  addin-tests:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps
+        run: npm ci || npm install
+
+      - name: Run add-in tests
+        run: npm test
+
   deploy:
     runs-on: ubuntu-latest
+    needs: [backend-tests]
 
     permissions:
       contents: read
@@ -30,16 +70,18 @@ jobs:
 
           # --update-env-vars / --update-secrets are NON-destructive: they add/replace
           # only the listed keys and leave existing env (e.g. GEMINI_API_KEY) intact.
-          # Secrets sa_key, QDRANT_URL, QDRANT_API_KEY must exist in Secret Manager and
-          # the Cloud Run runtime service account must have roles/secretmanager.secretAccessor.
+          # Secrets sa_key, QDRANT_URL, QDRANT_API_KEY, ADMIN_TOKEN, APP_TOKEN and
+          # TENANT_KEYS must exist in Secret Manager (see SECURITY_SETUP.md) and the
+          # Cloud Run runtime service account needs roles/secretmanager.secretAccessor.
           # NOTE: this wires up secrets + static config but does NOT flip the system
-          # to Vertex/Qdrant. The cutover switches (KB_BACKEND, LLM_PROVIDER,
-          # EMBED_PROVIDER) are set deliberately by you once verified — see
-          # V3_VECTOR_DB_SETUP.md. Leaving them out preserves the current behaviour.
-          # --update-* flags are non-destructive (existing env like GEMINI_API_KEY stays).
+          # to Vertex/Qdrant, and does NOT flip AUTH_ENABLED. The cutover switches
+          # (KB_BACKEND, LLM_PROVIDER, EMBED_PROVIDER, AUTH_ENABLED) are set
+          # deliberately by you once verified — see V3_VECTOR_DB_SETUP.md and
+          # SECURITY_SETUP.md. Leaving them out preserves the current behaviour.
+          # ALLOWED_ORIGINS locks CORS to the real task-pane origins (Rec 3).
           gcloud run deploy ${{ secrets.CLOUD_RUN_SERVICE }} \
             --source . \
             --region ${{ secrets.GCP_REGION }} \
             --allow-unauthenticated \
-            --update-env-vars GCP_PROJECT=grant-gni,GCP_REGION=europe-west1,VERTEX_LOCATION=europe-west1,VERTEX_RANK_LOCATION=global,VERTEX_RANK_MODEL=semantic-ranker-default-004,VERTEX_GEN_MODEL=gemini-2.5-flash,EMBED_MODEL=gemini-embedding-001,EMBED_DIM=1536 \
-            --update-secrets SA_KEY=sa_key:latest,QDRANT_URL=QDRANT_URL:latest,QDRANT_API_KEY=QDRANT_API_KEY:latest
+            --update-env-vars "GCP_PROJECT=grant-gni,GCP_REGION=europe-west1,VERTEX_LOCATION=europe-west1,VERTEX_RANK_LOCATION=global,VERTEX_RANK_MODEL=semantic-ranker-default-004,VERTEX_GEN_MODEL=gemini-2.5-flash,EMBED_MODEL=gemini-embedding-001,EMBED_DIM=1536,ALLOWED_ORIGINS=https://grant-gni.pages.dev,RATE_LIMIT_ENABLED=true" \
+            --update-secrets SA_KEY=sa_key:latest,QDRANT_URL=QDRANT_URL:latest,QDRANT_API_KEY=QDRANT_API_KEY:latest,ADMIN_TOKEN=ADMIN_TOKEN:latest,APP_TOKEN=APP_TOKEN:latest,TENANT_KEYS=TENANT_KEYS:latest
