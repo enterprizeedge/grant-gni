@@ -51,16 +51,30 @@ const VERTEX_SEARCH_TOOL_KEYS = new Set([
   "googleSearchRetrieval",
 ]);
 function sanitizeVertexPayload(payload) {
-  if (!payload || typeof payload !== "object" || !Array.isArray(payload.tools)) return payload;
+  if (!payload || typeof payload !== "object") return payload;
   const p = { ...payload };
-  p.tools = p.tools
-    .map((t) =>
-      t && typeof t === "object"
-        ? Object.fromEntries(Object.entries(t).filter(([k]) => !VERTEX_SEARCH_TOOL_KEYS.has(k)))
-        : t
-    )
-    .filter((t) => t && Object.keys(t).length > 0); // drop now-empty tool objects
-  if (p.tools.length === 0) delete p.tools;
+
+  // Vertex REQUIRES a role on every contents entry ("user" | "model"). The Gemini
+  // API defaults a missing role to "user"; Vertex 400s ("Please use a valid role").
+  // Fill in any missing role so single-turn payloads (Checklist, Review) work.
+  if (Array.isArray(p.contents)) {
+    p.contents = p.contents.map((c) =>
+      c && typeof c === "object" && !c.role ? { ...c, role: "user" } : c
+    );
+  }
+
+  // Strip AI-Studio built-in search tools that Vertex generateContent rejects.
+  if (Array.isArray(p.tools)) {
+    p.tools = p.tools
+      .map((t) =>
+        t && typeof t === "object"
+          ? Object.fromEntries(Object.entries(t).filter(([k]) => !VERTEX_SEARCH_TOOL_KEYS.has(k)))
+          : t
+      )
+      .filter((t) => t && Object.keys(t).length > 0); // drop now-empty tool objects
+    if (p.tools.length === 0) delete p.tools;
+  }
+
   return p;
 }
 
