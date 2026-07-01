@@ -95,7 +95,7 @@ app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "grant-gni-backend",
-    version: "0.4.0",
+    version: "0.5.0",
     provider: provider.name,
     providerConfigured: provider.isConfigured(),
     kbBackend: USE_QDRANT ? "qdrant" : "file",
