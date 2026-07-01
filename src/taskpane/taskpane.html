@@ -58,7 +58,7 @@
   <button id="refresh-chat-button" title="Clear chat and start new">&#8635;</button> <!-- Refresh icon -->
 
   <!-- Review Button -->
-  <button id="advisor-open" title="Review your proposal against winning proposals">Review</button>
+  <button id="advisor-open" title="Review your proposal">Review</button>
 
   <!-- Settings Icon -->
   <button id="settings-button" title="Settings">&#9881;</button> <!-- Gear icon -->
@@ -233,6 +233,17 @@
     <label for="advisor-call">Call ID (optional):</label>
     <input type="text" id="advisor-call" class="ms-TextField-field"
       placeholder="e.g. HORIZON-CL5-2026-D3-01-SYNTH">
+
+    <!-- Optional metadata filters. Leave blank to search everything for the programme.
+         Any filter you set narrows retrieval to matching documents. -->
+    <label for="advisor-cluster">Cluster (optional):</label>
+    <input type="text" id="advisor-cluster" class="ms-TextField-field" placeholder="e.g. 4">
+    <label for="advisor-topic">Topic (optional):</label>
+    <input type="text" id="advisor-topic" class="ms-TextField-field" placeholder="e.g. AI">
+    <label for="advisor-trl">TRL (optional):</label>
+    <input type="number" id="advisor-trl" class="ms-TextField-field" placeholder="e.g. 6" min="1" max="9">
+    <label for="advisor-country">Country (optional):</label>
+    <input type="text" id="advisor-country" class="ms-TextField-field" placeholder="e.g. Norway">
 
     <br />
     <button id="advisor-run" class="ms-Button ms-Button--primary">Review</button>

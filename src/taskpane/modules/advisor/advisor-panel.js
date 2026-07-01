@@ -231,6 +231,17 @@ async function runReview() {
   const section = el("advisor-section") ? el("advisor-section").value : "";
   const callId = el("advisor-call") ? el("advisor-call").value.trim() : "";
 
+  // Optional metadata filters — only included when the user fills them in.
+  const filters = {};
+  const cluster = el("advisor-cluster") ? el("advisor-cluster").value.trim() : "";
+  const topic = el("advisor-topic") ? el("advisor-topic").value.trim() : "";
+  const trl = el("advisor-trl") ? el("advisor-trl").value.trim() : "";
+  const country = el("advisor-country") ? el("advisor-country").value.trim() : "";
+  if (cluster) filters.cluster = cluster;
+  if (topic) filters.topic = topic;
+  if (trl) filters.trl = Number(trl);
+  if (country) filters.country = country;
+
   if (runBtn) runBtn.disabled = true;
   if (status) status.textContent = "Reading your section and consulting winning proposals…";
   try {
@@ -247,6 +258,7 @@ async function runReview() {
         program,
         section: section || null,
         callId: callId || null,
+        filters, // optional metadata filters (cluster/topic/trl/country)
         tenantId: getTenantId(), // ignored by backend when auth is on (uses the key)
       }),
     });

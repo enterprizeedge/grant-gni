@@ -100,21 +100,6 @@ export async function retrieveGrounded({
   const emb = embedder();
   const [vector] = await emb.embed([query], { taskType: "RETRIEVAL_QUERY" });
 
-  const f = (extra) => qdrant.toFilter({ ...filters, ...extra });
-
-  const [pub, ip, client] = await Promise.all([
-    qdrant.search(COLLECTIONS[TIER.PUBLIC], vector, { topK: topKPerTier, filter: f() }).catch(() => []),
-    qdrant.search(COLLECTIONS[TIER.IP], vector, { topK: topKPerTier, filter: f() }).catch(() => []),
-    tenantId
-      ? qdrant
-          .search(COLLECTIONS[TIER.CLIENT], vector, {
-            topK: topKPerTier,
-            filter: f({ tenantId }), // FORCED tenant isolation
-          })
-          .catch(() => [])
-      : Promise.resolve([]),
-  ]);
-
   const tag = (hits, tier) =>
     hits.map((h) => ({
       id: h.id,
@@ -126,11 +111,37 @@ export async function retrieveGrounded({
       section: (h.payload && h.payload.section) || null,
     }));
 
-  const candidates = [
-    ...tag(pub, TIER.PUBLIC),
-    ...tag(ip, TIER.IP),
-    ...tag(client, TIER.CLIENT),
-  ].filter((c) => c.text);
+  // programme is a HARD filter (+ tenantId for tier 3). The rest are SOFT filters
+  // (match the value OR the field is absent), so setting e.g. cluster=4 prefers
+  // cluster-4 docs without dropping untagged templates/exemplars.
+  const { programme = null, ...softAll } = filters || {};
+
+  // Run one search pass across all tiers. `soft` lets us drop optional filters on retry.
+  async function gather(soft) {
+    const filterFor = (tenant) =>
+      qdrant.buildFilter({
+        hard: { programme, ...(tenant ? { tenantId: tenant } : {}) },
+        soft,
+      });
+    const [pub, ip, client] = await Promise.all([
+      qdrant.search(COLLECTIONS[TIER.PUBLIC], vector, { topK: topKPerTier, filter: filterFor(null) }).catch(() => []),
+      qdrant.search(COLLECTIONS[TIER.IP], vector, { topK: topKPerTier, filter: filterFor(null) }).catch(() => []),
+      tenantId
+        ? qdrant
+            .search(COLLECTIONS[TIER.CLIENT], vector, { topK: topKPerTier, filter: filterFor(tenantId) })
+            .catch(() => [])
+        : Promise.resolve([]),
+    ]);
+    return [...tag(pub, TIER.PUBLIC), ...tag(ip, TIER.IP), ...tag(client, TIER.CLIENT)].filter((c) => c.text);
+  }
+
+  // SAFETY FALLBACK: if the optional filters were so specific that nothing matched
+  // (e.g. cluster=4 when every doc is cluster=5), retry with programme only.
+  let candidates = await gather(softAll);
+  const softKeys = Object.keys(softAll).filter((k) => softAll[k] != null);
+  if (candidates.length === 0 && softKeys.length > 0) {
+    candidates = await gather({});
+  }
 
   if (candidates.length === 0) {
     return { promptContext: [], citations: [] };
@@ -152,6 +163,21 @@ export async function deleteTenant(tenantId) {
   if (!tenantId) throw new Error("tenantId required");
   await qdrant.deleteByFilter(COLLECTIONS[TIER.CLIENT], qdrant.toFilter({ tenantId }));
   return { ok: true, tenantId, deleted: true };
+}
+
+// List every client that has uploaded tier-3 data, with indexed-passage counts.
+// Lets the operator see who has content (add-in uploads are ingested immediately,
+// so this reflects reality without any manual ingest step).
+export async function listTenants() {
+  try {
+    const hits = await qdrant.facet(COLLECTIONS[TIER.CLIENT], "tenantId");
+    return hits
+      .map((h) => ({ tenantId: h.value, passages: h.count }))
+      .sort((a, b) => b.passages - a.passages);
+  } catch (e) {
+    // Older Qdrant without the facet API — surface a clear hint.
+    return { error: `Could not list tenants: ${e.message}` };
+  }
 }
 
 export async function status(tenantId = null) {

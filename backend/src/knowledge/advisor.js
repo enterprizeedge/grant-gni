@@ -115,17 +115,27 @@ ${ctx}
 """${sectionText}"""`;
 }
 
-export async function advise({ provider, sectionText, program, section, callId, tenantId }) {
+export async function advise({ provider, sectionText, program, section, callId, tenantId, filters = {} }) {
   const skills = selectSkillsForReview({ section });
 
   let prompt;
   let citations = [];
   let legacyGrounding = null;
   if (USE_QDRANT) {
+    // programme is a hard filter; callId + cluster/topic/trl/country are soft
+    // (match-or-absent, handled in retrieveGrounded). Section stays a soft query signal.
+    const reviewFilters = {
+      programme: program || null,
+      ...(callId ? { callId } : {}),
+      ...(filters.cluster != null ? { cluster: filters.cluster } : {}),
+      ...(filters.topic != null ? { topic: filters.topic } : {}),
+      ...(filters.trl != null ? { trl: filters.trl } : {}),
+      ...(filters.country != null ? { country: filters.country } : {}),
+    };
     const { promptContext, citations: cites } = await retrieveGrounded({
       query: `${section || ""} ${sectionText}`.slice(0, 1500),
       tenantId,
-      filters: { programme: program || null },
+      filters: reviewFilters,
       finalTopK: 6,
     }).catch(() => ({ promptContext: [], citations: [] }));
     citations = cites;

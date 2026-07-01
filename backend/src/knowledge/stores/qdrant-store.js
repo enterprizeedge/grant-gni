@@ -103,6 +103,10 @@ export async function ensureCollection(
     { field_name: "docType", field_schema: "keyword" },
     { field_name: "section", field_schema: "keyword" },
     { field_name: "callId", field_schema: "keyword" },
+    { field_name: "cluster", field_schema: "keyword" },
+    { field_name: "topic", field_schema: "keyword" },
+    { field_name: "trl", field_schema: "integer" },
+    { field_name: "country", field_schema: "keyword" },
   ];
   if (tenantIndex) indexes.push({ field_name: "tenantId", field_schema: "keyword" });
   for (const idx of indexes) {
@@ -125,10 +129,28 @@ export async function upsert(name, points) {
 }
 
 // Build a Qdrant filter from a flat {key: value} object (null/undefined skipped).
+// Strict equality on every key.
 export function toFilter(eqMap = {}) {
   const must = Object.entries(eqMap)
     .filter(([, v]) => v !== null && v !== undefined)
     .map(([key, value]) => ({ key, match: { value } }));
+  return must.length ? { must } : undefined;
+}
+
+// Build a filter with HARD matches (must equal) and SOFT matches (equal OR the
+// field is absent). Soft matching means tagging a document with e.g. cluster=4
+// makes it eligible for a cluster=4 query, WITHOUT excluding documents (templates,
+// exemplars) that simply have no cluster tag.
+export function buildFilter({ hard = {}, soft = {} } = {}) {
+  const must = [];
+  for (const [key, value] of Object.entries(hard)) {
+    if (value !== null && value !== undefined) must.push({ key, match: { value } });
+  }
+  for (const [key, value] of Object.entries(soft)) {
+    if (value !== null && value !== undefined) {
+      must.push({ should: [{ key, match: { value } }, { is_empty: { key } }] });
+    }
+  }
   return must.length ? { must } : undefined;
 }
 
@@ -154,6 +176,17 @@ export async function deleteByFilter(name, filter) {
     body: { filter },
   });
   return { ok: true };
+}
+
+// Distinct values of a payload key with counts (Qdrant facet API).
+// Returns [{ value, count }]. Used to list which clients have uploaded data.
+export async function facet(name, key, { limit = 200 } = {}) {
+  if (!(await collectionExists(name))) return [];
+  const json = await qreq(`/collections/${encodeURIComponent(name)}/facet`, {
+    method: "POST",
+    body: { key, limit, exact: true },
+  });
+  return (json.result && json.result.hits) || [];
 }
 
 export async function count(name, filter = null) {

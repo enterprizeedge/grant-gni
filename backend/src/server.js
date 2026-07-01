@@ -145,7 +145,7 @@ app.post("/api/retrieve", async (req, res) => {
 // Grounded review. body: { sectionText, program, section?, callId? }
 // tenantId comes from auth (req.tenantId), NOT the body, so it can't be spoofed.
 app.post("/api/advise", requireTenant, async (req, res) => {
-  const { sectionText, program, section, callId } = req.body || {};
+  const { sectionText, program, section, callId, filters } = req.body || {};
   if (!sectionText || !sectionText.trim()) {
     return res.status(400).json({ error: { message: "sectionText is required" } });
   }
@@ -160,6 +160,7 @@ app.post("/api/advise", requireTenant, async (req, res) => {
       section,
       callId,
       tenantId: req.tenantId || null,
+      filters: filters || {}, // { cluster?, topic?, trl?, country? }
     });
     res.json(result);
   } catch (err) {
@@ -268,6 +269,18 @@ app.delete("/api/tenant/:id/documents", requireTenant, async (req, res) => {
 
 // ── Admin: bootstrap collections + ingest shared knowledge (tiers 1 & 2) ─────
 // Protected by ADMIN_TOKEN when auth is enabled.
+// List all clients that have uploaded tier-3 data (+ passage counts). Add-in
+// uploads are ingested immediately, so this reflects reality with no manual step.
+app.get("/api/admin/tenants", requireAdmin, async (_req, res) => {
+  if (!USE_QDRANT) return res.json({ tenants: [] });
+  try {
+    const tenants = await kb.listTenants();
+    res.json({ tenants });
+  } catch (err) {
+    res.status(500).json({ error: { message: err.message } });
+  }
+});
+
 app.post("/api/admin/bootstrap", requireAdmin, async (req, res) => {
   try {
     const recreate = String(req.query.recreate || (req.body && req.body.recreate) || "") === "true";
