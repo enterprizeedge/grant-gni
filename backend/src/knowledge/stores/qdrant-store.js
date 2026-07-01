@@ -47,9 +47,47 @@ export async function collectionExists(name) {
   }
 }
 
+// Returns the configured vector dimension of an existing collection, or null.
+export async function getCollectionDim(name) {
+  try {
+    const json = await qreq(`/collections/${encodeURIComponent(name)}`, { method: "GET" });
+    const vectors = json?.result?.config?.params?.vectors;
+    // vectors may be { size, distance } (single) or a named-vectors map.
+    if (vectors && typeof vectors.size === "number") return vectors.size;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export async function deleteCollection(name) {
+  await qreq(`/collections/${encodeURIComponent(name)}`, { method: "DELETE" }).catch(() => {});
+  return { ok: true };
+}
+
 // Create the collection if missing. Adds payload indexes used for filtering.
-export async function ensureCollection(name, dim, { distance = QDRANT.distance, tenantIndex = false } = {}) {
-  if (await collectionExists(name)) return false;
+// recreate=true drops an existing collection whose dim differs from `dim`.
+export async function ensureCollection(
+  name,
+  dim,
+  { distance = QDRANT.distance, tenantIndex = false, recreate = false } = {}
+) {
+  if (await collectionExists(name)) {
+    const existing = await getCollectionDim(name);
+    if (existing != null && existing !== dim) {
+      if (recreate) {
+        console.warn(`[qdrant] ${name} dim ${existing} != ${dim}; recreating.`);
+        await deleteCollection(name);
+      } else {
+        throw new Error(
+          `Collection "${name}" exists with dim ${existing} but the embedder produces ${dim}. ` +
+            `Run the seed with EMBED_PROVIDER=vertex, or bootstrap with recreate=true to rebuild.`
+        );
+      }
+    } else {
+      return false; // already correct
+    }
+  }
   await qreq(`/collections/${encodeURIComponent(name)}`, {
     method: "PUT",
     body: {

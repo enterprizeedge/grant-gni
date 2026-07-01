@@ -33,6 +33,7 @@ import { extractText } from "./knowledge/extract.js";
 import { sanitizeTenantId, tenantDir, tenantStorePath, tenantUploadsDir } from "./knowledge/tenancy.js";
 import { USE_QDRANT, TIER } from "./config/knowledge.js";
 import * as kb from "./knowledge/kb.js";
+import { seedSynthetic } from "./knowledge/seed.js";
 import { requireTenant, requireAdmin, AUTH_ENABLED } from "./auth/auth.js";
 
 dotenv.config();
@@ -267,11 +268,30 @@ app.delete("/api/tenant/:id/documents", requireTenant, async (req, res) => {
 
 // ── Admin: bootstrap collections + ingest shared knowledge (tiers 1 & 2) ─────
 // Protected by ADMIN_TOKEN when auth is enabled.
-app.post("/api/admin/bootstrap", requireAdmin, async (_req, res) => {
+app.post("/api/admin/bootstrap", requireAdmin, async (req, res) => {
   try {
-    const r = await kb.ensureCollections();
+    const recreate = String(req.query.recreate || (req.body && req.body.recreate) || "") === "true";
+    const r = await kb.ensureCollections({ recreate });
     res.json({ ok: true, ...r });
   } catch (err) {
+    res.status(500).json({ error: { message: err.message } });
+  }
+});
+
+// Seed the synthetic corpus across the 3 tiers using the SERVER's configured
+// Vertex/Qdrant providers (no local GCP creds needed). ?recreate=true rebuilds
+// collections first (use when dims changed).
+app.post("/api/admin/seed", requireAdmin, async (req, res) => {
+  if (!USE_QDRANT) {
+    return res.status(400).json({ error: { message: "KB_BACKEND must be 'qdrant' to seed." } });
+  }
+  try {
+    const recreate = String(req.query.recreate || (req.body && req.body.recreate) || "") === "true";
+    const logs = [];
+    const r = await seedSynthetic({ recreate, log: (m) => logs.push(m) });
+    res.json({ ok: true, ...r, logs });
+  } catch (err) {
+    console.error("[/api/admin/seed] error:", err);
     res.status(500).json({ error: { message: err.message } });
   }
 });

@@ -33,11 +33,11 @@ function uuidFrom(logicalId) {
   );
 }
 
-export async function ensureCollections() {
+export async function ensureCollections({ recreate = false } = {}) {
   const dim = embedder().dim || GCP.embedDim;
-  await qdrant.ensureCollection(COLLECTIONS[TIER.PUBLIC], dim);
-  await qdrant.ensureCollection(COLLECTIONS[TIER.IP], dim);
-  await qdrant.ensureCollection(COLLECTIONS[TIER.CLIENT], dim, { tenantIndex: true });
+  await qdrant.ensureCollection(COLLECTIONS[TIER.PUBLIC], dim, { recreate });
+  await qdrant.ensureCollection(COLLECTIONS[TIER.IP], dim, { recreate });
+  await qdrant.ensureCollection(COLLECTIONS[TIER.CLIENT], dim, { tenantIndex: true, recreate });
   return { dim, collections: COLLECTIONS };
 }
 

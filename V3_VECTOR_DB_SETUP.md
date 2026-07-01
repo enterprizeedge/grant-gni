@@ -88,18 +88,29 @@ LLM_PROVIDER=vertex
 EMBED_PROVIDER=vertex
 ```
 
-Then verify and seed:
+Then seed **server-side** (recommended — uses the server's Vertex + Qdrant config, so
+you need NO GCP creds on your laptop):
 
 ```
-# 1. create collections
-curl -X POST https://<url>/api/admin/bootstrap        # (no token needed until AUTH_ENABLED)
+# create collections + seed all 3 tiers in one call
+curl -X POST "https://<url>/api/admin/seed"           # add ?recreate=true to rebuild (see below)
 
-# 2. seed the synthetic corpus across the 3 tiers
-cd backend && npm run ingest:qdrant                   # needs QDRANT_URL/KEY, SA_KEY, EMBED_PROVIDER=vertex in env
-
-# 3. confirm
-curl https://<url>/health                             # kbBackend should now be "qdrant"
+# confirm
+curl https://<url>/health                             # kbBackend should be "qdrant"
 ```
+
+(With AUTH_ENABLED, add `-H "Authorization: Bearer <ADMIN_TOKEN>"`.)
+
+> **If you see `Vector dimension error: expected dim 1536, got 256`** — that means the
+> seed ran with the local 256-dim embedder instead of Vertex. It happens when running the
+> CLI (`npm run ingest:qdrant`) locally without `EMBED_PROVIDER=vertex`. Fix: seed via
+> `POST /api/admin/seed` after the cutover (Vertex is active there), or, if collections
+> were already created at the wrong dim, rebuild them once:
+> `curl -X POST "https://<url>/api/admin/seed?recreate=true"`.
+
+The CLI (`cd backend && npm run ingest:qdrant`) still works if you prefer it, but it needs
+`QDRANT_URL`, `QDRANT_API_KEY`, `SA_KEY` (or `GOOGLE_APPLICATION_CREDENTIALS`) and
+`EMBED_PROVIDER=vertex` in your local `backend/.env`. Add `-- --recreate` to rebuild.
 
 Open the add-in → **Review** a section. You should get suggestions grounded in the seeded
 tiers. **Rollback** at any time by setting `KB_BACKEND=file` (and `LLM_PROVIDER=gemini`)
