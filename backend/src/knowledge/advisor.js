@@ -167,8 +167,10 @@ export async function advise({ provider, sectionText, program, section, callId, 
     throw new Error(`LLM error (${status}): ${body}`);
   }
   let suggestions = [];
+  let usageTokens = 0;
   try {
     const parsed = JSON.parse(body);
+    usageTokens = parsed?.usageMetadata?.totalTokenCount || 0; // billing metering
     const text = parsed?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") || "";
     suggestions = extractJson(text) || [];
   } catch {
@@ -196,5 +198,6 @@ export async function advise({ provider, sectionText, program, section, callId, 
     // Only client-visible citations (tier-1 + tier-3) are returned; tier-2 IP never is.
     citations,
     grounding: groundingSummary,
+    usageTokens, // total tokens consumed (server-side quota metering)
   };
 }

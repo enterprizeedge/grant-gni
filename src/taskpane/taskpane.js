@@ -62,7 +62,7 @@ import {
   saveGlanceCollapsedState
 } from './modules/settings/settings-store.js';
 import { restoreCheckpoint, createCheckpoint } from './modules/checkpoints/checkpoints.js';
-import { appHeaders } from './modules/backend/app-token.js';
+import { appHeaders, loadLicenseKey, saveLicenseKey } from './modules/backend/app-token.js';
 
 // Configure marked for GFM (GitHub Flavored Markdown) with tables, breaks, etc.
 marked.setOptions({
@@ -533,6 +533,30 @@ function showSettingsView() {
   // Load AI safety filter setting
   const safetySelect = document.getElementById("safety-mode-select");
   if (safetySelect) safetySelect.value = loadSafetyMode();
+
+  // Load license key + refresh the usage meter
+  const licenseInput = document.getElementById("license-key-input");
+  if (licenseInput) licenseInput.value = loadLicenseKey();
+  refreshUsageStatus();
+}
+
+// Fetch this month's AI allowance from the backend and show it in Settings.
+async function refreshUsageStatus() {
+  const el = document.getElementById("usage-status");
+  if (!el) return;
+  try {
+    const res = await fetch(`${getBackendBaseUrl()}/api/usage`, { headers: appHeaders() });
+    if (!res.ok) return;
+    const u = await res.json();
+    const used = (u.usedTokens / 1e6).toFixed(2);
+    const allowance = (u.allowanceTokens / 1e6).toFixed(1);
+    const boost = u.boostTokens ? ` (incl. +${(u.boostTokens / 1e6).toFixed(0)}M boost)` : "";
+    el.textContent = u.licensed
+      ? `Plan: ${u.planName} — ${used}M of ${allowance}M tokens used this month${boost} (${u.percentUsed}%).`
+      : `Free trial — ${used}M of ${allowance}M tokens used this month (${u.percentUsed}%). Add a license key to unlock more.`;
+  } catch {
+    /* usage display is best-effort; never block settings on it */
+  }
 }
 
 function showMainView() {
@@ -599,6 +623,8 @@ function saveApiKey() {
   saveRedlineAuthor(redlineAuthor);
   const safetySelect = document.getElementById("safety-mode-select");
   if (safetySelect) saveSafetyMode(safetySelect.value);
+  const licenseInput = document.getElementById("license-key-input");
+  if (licenseInput) saveLicenseKey(licenseInput.value);
   // Glance settings are saved automatically on change
   showMainView();
   addMessageToChat("System", "Settings saved successfully.");

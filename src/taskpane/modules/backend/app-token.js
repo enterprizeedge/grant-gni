@@ -22,7 +22,30 @@ function currentToken() {
   return APP_TOKEN;
 }
 
-// Merge the app token into a headers object: appHeaders({ "Content-Type": ... })
+// The user's license key (issued at purchase via Paddle, pasted in Settings).
+// Shared storage key with the Review panel's client key — one key, all features.
+export function loadLicenseKey() {
+  try {
+    return (localStorage.getItem("grantGniClientKey") || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+export function saveLicenseKey(key) {
+  try {
+    localStorage.setItem("grantGniClientKey", String(key || "").trim());
+  } catch {
+    /* localStorage unavailable */
+  }
+}
+
+// Merge the app token (+ license key when present) into a headers object:
+// appHeaders({ "Content-Type": ... }). Used by EVERY backend call, so pasting
+// a license key in Settings upgrades all features at once.
 export function appHeaders(base = {}) {
-  return { ...base, "X-App-Token": currentToken() };
+  const headers = { ...base, "X-App-Token": currentToken() };
+  const license = loadLicenseKey();
+  if (license && !headers.Authorization) headers.Authorization = `Bearer ${license}`;
+  return headers;
 }

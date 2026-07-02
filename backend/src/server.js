@@ -44,6 +44,16 @@ import { requireTenant, requireAdmin, AUTH_ENABLED } from "./auth/auth.js";
 import { rateLimit } from "./middleware/rate-limit.js";
 import { requireAppToken } from "./middleware/app-token.js";
 import { requestLog, extractUsage } from "./middleware/request-log.js";
+import { enforceQuota, recordUsage, resolveBilling } from "./billing/quota.js";
+import { describeUsage, monthKey } from "./billing/plans.js";
+import { getUsage } from "./billing/store.js";
+import { paddleWebhook, licenseKeyPage } from "./billing/paddle.js";
+import {
+  createLicenseHandler,
+  listLicensesHandler,
+  updateLicenseHandler,
+  boostLicenseHandler,
+} from "./billing/admin.js";
 
 const PORT = Number(process.env.PORT) || 3001;
 const USE_HTTPS = String(process.env.USE_HTTPS || "true").toLowerCase() === "true";
@@ -75,7 +85,16 @@ function buildProvider() {
 const provider = buildProvider();
 
 const app = express();
-app.use(express.json({ limit: "25mb" })); // documents (base64) can be large
+// Keep the raw body around: Paddle webhook signatures are computed over the
+// exact bytes received, so they must be verified against the unparsed payload.
+app.use(
+  express.json({
+    limit: "25mb", // documents (base64) can be large
+    verify: (req, _res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
 // IMPORTANT: never throw from the origin callback. Throwing makes the CORS
 // preflight (OPTIONS) fail with a 500 and no CORS headers, which the browser
 // reports to the add-in as the opaque "Failed to fetch". Instead we reflect the
@@ -116,7 +135,7 @@ app.get("/health", (_req, res) => {
 // Mirror of Gemini's generateContent. Body passed through; response verbatim.
 // Protected by: app token (proves the caller is our add-in build) + per-caller
 // rate limit / daily quota. Per-tenant billing/metering plugs in at the same seam.
-app.post("/api/generate", requireAppToken, rateLimit, async (req, res) => {
+app.post("/api/generate", requireAppToken, rateLimit, enforceQuota, async (req, res) => {
   const model = req.query.model || (req.body && req.body.model) || "gemini-flash-latest";
   if (!provider.isConfigured()) {
     return res.status(502).json({
@@ -134,6 +153,9 @@ app.post("/api/generate", requireAppToken, rateLimit, async (req, res) => {
       res.setHeader("X-Model-Used", modelUsed); // visibility into fallbacks
     }
     res.locals.usage = extractUsage(body); // token counts -> structured request log
+    if (res.locals.usage && res.locals.usage.totalTokens) {
+      recordUsage(req, res.locals.usage.totalTokens); // monthly quota metering
+    }
     res.status(status).type("application/json").send(body);
   } catch (err) {
     console.error("[/api/generate] proxy error:", err);
@@ -158,7 +180,7 @@ app.post("/api/retrieve", requireAppToken, rateLimit, requireTenant, async (req,
 
 // Grounded review. body: { sectionText, program, section?, callId? }
 // tenantId comes from auth (req.tenantId), NOT the body, so it can't be spoofed.
-app.post("/api/advise", requireAppToken, rateLimit, requireTenant, async (req, res) => {
+app.post("/api/advise", requireAppToken, rateLimit, requireTenant, enforceQuota, async (req, res) => {
   const { sectionText, program, section, callId, filters } = req.body || {};
   if (!sectionText || !sectionText.trim()) {
     return res.status(400).json({ error: { message: "sectionText is required" } });
@@ -176,12 +198,47 @@ app.post("/api/advise", requireAppToken, rateLimit, requireTenant, async (req, r
       tenantId: req.tenantId || null,
       filters: filters || {}, // { cluster?, topic?, trl?, country? }
     });
+    if (result && result.usageTokens) {
+      res.locals.usage = { totalTokens: result.usageTokens };
+      recordUsage(req, result.usageTokens); // monthly quota metering
+    }
     res.json(result);
   } catch (err) {
     console.error("[/api/advise] error:", err);
     res.status(502).json({ error: { message: err.message } });
   }
 });
+
+// ── Billing: usage + Paddle integration ──────────────────────────────────────
+// The add-in shows "X of Y used this month" from here (works for licensed
+// callers AND anonymous trial users).
+app.get("/api/usage", async (req, res) => {
+  try {
+    const billing = await resolveBilling(req);
+    const usage = await getUsage(billing.caller, monthKey());
+    res.json({
+      licensed: billing.licensed,
+      ...describeUsage(billing.plan, usage.tokens, usage.extraTokens),
+    });
+  } catch (err) {
+    res.status(500).json({ error: { message: err.message } });
+  }
+});
+
+// Paddle webhook (signature-verified against the raw body; 503 until
+// PADDLE_WEBHOOK_SECRET is configured, so this is inert pre-launch).
+app.post("/api/billing/webhook/paddle", paddleWebhook);
+
+// Paddle checkout success page -> shows the buyer their license key.
+app.get("/api/billing/key", licenseKeyPage);
+
+// ── Admin license management (INVOICE-FIRST billing) ─────────────────────────
+// Mint/upgrade/boost/revoke license keys by hand when invoices are paid.
+// See backend/src/billing/admin.js header for curl examples.
+app.post("/api/admin/licenses", requireAdmin, createLicenseHandler);
+app.get("/api/admin/licenses", requireAdmin, listLicensesHandler);
+app.post("/api/admin/licenses/:key", requireAdmin, updateLicenseHandler);
+app.post("/api/admin/licenses/:key/boost", requireAdmin, boostLicenseHandler);
 
 // ── Per-client private knowledge base (tier 3, isolated) ─────────────────────
 // The effective tenant always comes from auth (req.tenantId); the URL :id is
