@@ -14,54 +14,21 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
 
-  <!-- Your Add-in's CSS -->
+  <!-- Your Add-in's CSS (single source of truth — no inline styles) -->
   <link rel="stylesheet" href="taskpane.css" type="text/css" />
-
-  <!-- Review panel styles -->
-  <style>
-    #advisor-open {
-      right: 92px; width: auto; min-height: 34px; padding: 7px 16px; font-size: 13px;
-      font-weight: 600; line-height: 1.1; border-radius: 17px;
-    }
-    .review-kb { margin-top: 22px; padding-top: 14px; border-top: 1px solid #e1dfdd; }
-    .review-kb h4 { margin: 0 0 6px; }
-    .review-card {
-      border: 1px solid #e1dfdd; border-left: 3px solid var(--primary-color, #0078d4);
-      border-radius: 6px; padding: 12px 14px; margin-bottom: 12px; background: #faf9f8;
-    }
-    .review-issue { font-weight: 600; margin-bottom: 6px; }
-    .review-suggestion { margin-bottom: 8px; }
-    .review-rationale { font-size: 13px; opacity: 0.85; }
-
-    /* Popup */
-    .review-modal {
-      position: fixed; inset: 0; background: rgba(0,0,0,0.45);
-      display: flex; align-items: center; justify-content: center; z-index: 1000;
-    }
-    .review-modal-card {
-      background: #fff; width: 94%; height: 90%; max-width: 900px;
-      border-radius: 8px; display: flex; flex-direction: column; overflow: hidden;
-      box-shadow: 0 8px 32px rgba(0,0,0,0.3);
-    }
-    .review-modal-header {
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 12px 16px; border-bottom: 1px solid #e1dfdd; flex: 0 0 auto;
-    }
-    .review-modal-header .ms-Button { margin-left: 8px; }
-    .review-modal-body { padding: 16px; overflow-y: auto; flex: 1 1 auto; }
-  </style>
 </head>
 
 <body class="ms-font-m ms-welcome">
 
-  <!-- Refresh Button -->
-  <button id="refresh-chat-button" title="Clear chat and start new">&#8635;</button> <!-- Refresh icon -->
-
-  <!-- Review Button -->
-  <button id="advisor-open" title="Review your proposal">Review</button>
-
-  <!-- Settings Icon -->
-  <button id="settings-button" title="Settings">&#9881;</button> <!-- Gear icon -->
+  <!-- App header: brand + actions (replaces the floating overlay buttons) -->
+  <header id="app-header">
+    <span id="app-brand">Grant&nbsp;Gni</span>
+    <div id="app-header-actions">
+      <button id="advisor-open" title="Review your proposal">Review</button>
+      <button id="refresh-chat-button" title="Clear chat and start new">&#8635;</button>
+      <button id="settings-button" title="Settings">&#9881;</button>
+    </div>
+  </header>
 
   <!-- Main App View -->
   <div id="main-view" class="view-container">
@@ -232,8 +199,11 @@
       program template, and the call's strategic intent. Select text first, or the whole
       document is reviewed.</p>
 
-    <label for="advisor-client">Client ID:</label>
+    <label for="advisor-client" id="advisor-client-label">Client ID:</label>
     <input type="text" id="advisor-client" class="ms-TextField-field" placeholder="your-organisation">
+    <p class="settings-hint" id="advisor-client-hint" style="display:none;">
+      Your identity and private knowledge base are set by your license key — no Client ID needed.
+    </p>
 
     <label for="advisor-program">Funding program:</label>
     <select id="advisor-program" class="ms-TextField-field">
@@ -292,6 +262,7 @@
       <div class="review-modal-header">
         <strong>Review suggestions</strong>
         <div>
+          <button id="advisor-modal-popout" class="ms-Button" title="Open in a large window">Open large</button>
           <button id="advisor-modal-copy" class="ms-Button">Copy</button>
           <button id="advisor-modal-close" class="ms-Button">Close</button>
         </div>

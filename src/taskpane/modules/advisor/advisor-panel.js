@@ -1,6 +1,6 @@
-/* global Word, document, fetch, FileReader, navigator */
+/* global Word, Office, document, window, fetch, FileReader, navigator, localStorage */
 
-import { appHeaders } from "../backend/app-token.js";
+import { appHeaders, loadLicenseKey } from "../backend/app-token.js";
 
 // Grant Gni — Review panel.
 // Reviews the current section of the proposal against the client's own uploaded
@@ -40,37 +40,78 @@ function authHeaders(base = {}) {
   return key ? { ...withApp, Authorization: `Bearer ${key}` } : withApp;
 }
 
-function showReviewView() {
-  const main = el("main-view");
-  const settings = el("settings-view");
-  const view = el("advisor-view");
-  if (main) main.style.display = "none";
-  if (settings) settings.style.display = "none";
-  if (view) {
-    // Clear any leftover transition class so the panel is fully opaque/clickable.
-    view.classList.remove("view-hidden");
-    view.classList.add("view-container");
-    view.style.display = "block";
+// Deterministic view switching (mirrors showOnlyView in taskpane.js): exactly
+// one view is visible, no timers, no leftover transition classes.
+function showOnly(showId) {
+  for (const id of ["main-view", "settings-view", "advisor-view"]) {
+    const v = el(id);
+    if (!v) continue;
+    if (id === showId) {
+      v.classList.remove("view-hidden");
+      v.classList.add("view-container");
+      v.style.display = "block";
+    } else {
+      v.style.display = "none";
+    }
   }
+}
+
+function showReviewView() {
+  showOnly("advisor-view");
+  // With a license key, identity comes from the key server-side — hide the
+  // legacy Client ID field so users aren't asked for something we don't use.
+  const licensed = !!loadLicenseKey();
+  const clientInput = el("advisor-client");
+  const clientLabel = el("advisor-client-label");
+  const clientHint = el("advisor-client-hint");
+  if (clientInput) clientInput.style.display = licensed ? "none" : "";
+  if (clientLabel) clientLabel.style.display = licensed ? "none" : "";
+  if (clientHint) clientHint.style.display = licensed ? "" : "none";
   refreshKbStatus();
 }
-function hideReviewView() {
-  const view = el("advisor-view");
-  const main = el("main-view");
-  if (view) view.style.display = "none";
-  if (main) {
-    main.style.display = "block";
-    // CRITICAL: the main view may still carry the `view-hidden` class (opacity:0,
-    // pointer-events:none) from an earlier view transition. Without removing it,
-    // chat + checklist render invisibly and the pane looks blank after "Back".
-    main.classList.remove("view-hidden");
-    main.classList.add("view-container");
+
+// Open the current Review results in a large Office dialog window for
+// comfortable reading. Content is handed over via dialog messaging, with a
+// same-origin localStorage fallback for hosts where messaging is unavailable.
+function openPopout() {
+  const body = el("advisor-modal-body");
+  if (!body || !body.innerHTML.trim()) return;
+  const payload = { title: "Review suggestions", html: body.innerHTML, ts: Date.now() };
+  try {
+    localStorage.setItem("grantGniPopoutContent", JSON.stringify(payload));
+  } catch {
+    /* storage unavailable — messaging path still works */
   }
-  // Restore the floating top controls hidden when entering Settings/Review.
+  const url = `${window.location.origin}/popout.html`;
+  try {
+    Office.context.ui.displayDialogAsync(
+      url,
+      { width: 55, height: 75, displayInIframe: false },
+      (result) => {
+        if (result.status !== Office.AsyncResultStatus.Succeeded) return;
+        const dialog = result.value;
+        dialog.addEventHandler(Office.EventType.DialogMessageReceived, (arg) => {
+          if (arg.message === "popout-ready") {
+            try {
+              dialog.messageChild(JSON.stringify(payload));
+            } catch {
+              /* older host without messageChild — localStorage fallback covers it */
+            }
+          }
+        });
+      }
+    );
+  } catch (e) {
+    console.warn("Pop-out unavailable in this host:", e);
+  }
+}
+function hideReviewView() {
+  showOnly("main-view");
+  // Restore the header controls hidden when entering Settings/Review.
   const settingsBtn = el("settings-button");
   const refreshBtn = el("refresh-chat-button");
-  if (settingsBtn) settingsBtn.style.display = "block";
-  if (refreshBtn) refreshBtn.style.display = "block";
+  if (settingsBtn) settingsBtn.style.display = "";
+  if (refreshBtn) refreshBtn.style.display = "";
 }
 
 function escapeHtml(s) {
@@ -306,4 +347,5 @@ export function initAdvisorPanel(config = {}) {
   if (el("advisor-run")) el("advisor-run").onclick = runReview;
   if (el("advisor-modal-close")) el("advisor-modal-close").onclick = closeModal;
   if (el("advisor-modal-copy")) el("advisor-modal-copy").onclick = copyResults;
+  if (el("advisor-modal-popout")) el("advisor-modal-popout").onclick = openPopout;
 }

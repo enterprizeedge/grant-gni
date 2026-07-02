@@ -113,6 +113,31 @@ export async function enforceQuota(req, res, next) {
   }
 }
 
+// Tenant binding that understands BOTH auth systems — env TENANT_KEYS and
+// store-issued (invoice/Paddle) licenses. Replaces bare requireTenant on the
+// tenant-scoped routes so a gg_live_… key is a complete identity:
+//   1. Active license with a tenantId  -> that tenant (body/URL ignored).
+//   2. Active license without tenantId -> the license key itself as tenant.
+//   3. No license + AUTH_ENABLED=false -> legacy body/param fallback (dev/trial).
+//   4. No license + AUTH_ENABLED=true  -> 401.
+export async function requireTenantOrLicense(req, res, next) {
+  try {
+    const billing = await resolveBilling(req);
+    if (billing.licensed) {
+      req.tenantId = billing.tenantId || billing.caller;
+      return next();
+    }
+  } catch (err) {
+    console.error("[billing] tenant resolution failed:", err.message);
+  }
+  const authEnabled = String(process.env.AUTH_ENABLED || "false").toLowerCase() === "true";
+  if (!authEnabled) {
+    req.tenantId = (req.body && req.body.tenantId) || req.params.id || null;
+    return next();
+  }
+  return res.status(401).json({ error: { message: "Unauthorized: valid license or client key required." } });
+}
+
 // Record spent tokens after a response. Fire-and-forget.
 export function recordUsage(req, totalTokens) {
   if (!req.billing || !totalTokens || totalTokens <= 0) return;

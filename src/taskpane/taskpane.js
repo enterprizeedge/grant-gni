@@ -471,27 +471,30 @@ function showWelcomeScreen() {
 
 // --- Settings & View Management ---
 
-function switchView(hideId, showId) {
-  const hideEl = document.getElementById(hideId);
-  const showEl = document.getElementById(showId);
+// All top-level views. Exactly ONE is ever visible.
+const ALL_VIEWS = ["main-view", "settings-view", "advisor-view"];
 
-  if (!hideEl || !showEl) return;
+// Deterministic view switching. The previous implementation faded views with a
+// 200ms setTimeout; interrupting it (fast clicks, or the Review panel's own
+// show/hide) left two views displayed on top of each other — the "ghost text"
+// overlap bug. No timers, no transitions on display: hide everything, show one.
+function showOnlyView(showId) {
+  for (const id of ALL_VIEWS) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    if (id === showId) {
+      el.classList.remove("view-hidden");
+      el.classList.add("view-container");
+      el.style.display = "block";
+    } else {
+      el.style.display = "none";
+    }
+  }
+}
 
-  // Fade out current
-  hideEl.classList.add("view-hidden");
-  hideEl.classList.remove("view-container"); // Ensure it doesn't conflict
-
-  setTimeout(() => {
-    hideEl.style.display = "none";
-    showEl.style.display = "block";
-
-    // Force reflow
-    void showEl.offsetWidth;
-
-    // Fade in new
-    showEl.classList.remove("view-hidden");
-    showEl.classList.add("view-container");
-  }, 200); // Match CSS transition speed
+// Kept for call-site compatibility; hideId is implied (everything else hides).
+function switchView(_hideId, showId) {
+  showOnlyView(showId);
 }
 
 function showSettingsView() {
@@ -560,8 +563,8 @@ async function refreshUsageStatus() {
 }
 
 function showMainView() {
-  document.getElementById("settings-button").style.display = "block";
-  document.getElementById("refresh-chat-button").style.display = "block";
+  document.getElementById("settings-button").style.display = "";
+  document.getElementById("refresh-chat-button").style.display = "";
 
   switchView("settings-view", "main-view");
 

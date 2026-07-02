@@ -40,11 +40,11 @@ import { sanitizeTenantId, tenantDir, tenantStorePath, tenantUploadsDir } from "
 import { USE_QDRANT, TIER } from "./config/knowledge.js";
 import * as kb from "./knowledge/kb.js";
 import { seedSynthetic } from "./knowledge/seed.js";
-import { requireTenant, requireAdmin, AUTH_ENABLED } from "./auth/auth.js";
+import { requireAdmin, AUTH_ENABLED } from "./auth/auth.js";
 import { rateLimit } from "./middleware/rate-limit.js";
 import { requireAppToken } from "./middleware/app-token.js";
 import { requestLog, extractUsage } from "./middleware/request-log.js";
-import { enforceQuota, recordUsage, resolveBilling } from "./billing/quota.js";
+import { enforceQuota, recordUsage, resolveBilling, requireTenantOrLicense } from "./billing/quota.js";
 import { describeUsage, monthKey } from "./billing/plans.js";
 import { getUsage } from "./billing/store.js";
 import { paddleWebhook, licenseKeyPage } from "./billing/paddle.js";
@@ -167,7 +167,7 @@ app.post("/api/generate", requireAppToken, rateLimit, enforceQuota, async (req, 
 // requireTenant binds the tenant server-side (same rule as /api/advise), so a
 // caller can no longer read another tenant's private store by naming it in the
 // body. Rate-limited like every LLM/vector endpoint.
-app.post("/api/retrieve", requireAppToken, rateLimit, requireTenant, async (req, res) => {
+app.post("/api/retrieve", requireAppToken, rateLimit, requireTenantOrLicense, async (req, res) => {
   try {
     const { query, topK, filter } = req.body || {};
     if (!query) return res.status(400).json({ error: { message: "query is required" } });
@@ -180,7 +180,7 @@ app.post("/api/retrieve", requireAppToken, rateLimit, requireTenant, async (req,
 
 // Grounded review. body: { sectionText, program, section?, callId? }
 // tenantId comes from auth (req.tenantId), NOT the body, so it can't be spoofed.
-app.post("/api/advise", requireAppToken, rateLimit, requireTenant, enforceQuota, async (req, res) => {
+app.post("/api/advise", requireAppToken, rateLimit, requireTenantOrLicense, enforceQuota, async (req, res) => {
   const { sectionText, program, section, callId, filters } = req.body || {};
   if (!sectionText || !sectionText.trim()) {
     return res.status(400).json({ error: { message: "sectionText is required" } });
@@ -249,7 +249,7 @@ function tenantOf(req) {
 
 // Upload one document into the caller's private KB.
 // body: { filename, contentBase64? | text?, program?, docType?, section? }
-app.post("/api/tenant/:id/documents", requireAppToken, rateLimit, requireTenant, async (req, res) => {
+app.post("/api/tenant/:id/documents", requireAppToken, rateLimit, requireTenantOrLicense, async (req, res) => {
   let id;
   try {
     id = tenantOf(req);
@@ -294,7 +294,7 @@ app.post("/api/tenant/:id/documents", requireAppToken, rateLimit, requireTenant,
 });
 
 // The caller's private KB status + uploaded file list.
-app.get("/api/tenant/:id/status", requireTenant, async (req, res) => {
+app.get("/api/tenant/:id/status", requireTenantOrLicense, async (req, res) => {
   let id;
   try {
     id = tenantOf(req);
@@ -320,7 +320,7 @@ app.get("/api/tenant/:id/status", requireTenant, async (req, res) => {
 });
 
 // GDPR deletion: wipe the caller's private KB entirely (vectors + records).
-app.delete("/api/tenant/:id/documents", requireTenant, async (req, res) => {
+app.delete("/api/tenant/:id/documents", requireTenantOrLicense, async (req, res) => {
   let id;
   try {
     id = tenantOf(req);

@@ -76,6 +76,11 @@ module.exports = async (env, options) => {
             to: "taskpane.css",
           },
           {
+            // Standalone pop-out reader page (opened via Office dialog API).
+            from: "src/taskpane/popout.html",
+            to: "popout.html",
+          },
+          {
             from: "src/shortcuts.json",
             to: "shortcuts.json",
           },
